@@ -9,8 +9,6 @@ from pyspark.sql.functions import (
     udf, col, explode, radians,
     sin, cos, sqrt, atan2, lit, monotonically_increasing_id
 )
-from pyspark.sql.types import (
-    StringType, ArrayType )
 from pyspark.sql import Window
 from tempo import *
 
@@ -19,30 +17,17 @@ import h3
 import pandas as pd
 import numpy as np
 from datetime import datetime
-
-# Custom libraries
-from helpers import select_resolution
+from helpers import *
 
 # -----------------------------------------------------------------------------
 # Close encounter default parameters
 # -----------------------------------------------------------------------------
-# Minimal horizontal distance before close encounter (NM)
-distance_nm = 5
-
-# Minimal vertical distance before close encounter (flight levels - FL)
-FL_diff = 9
-
-# The minimum flight level for assessment of the trajectory (lower sections are not analyzed)
-FL_min = 250
-
-# The maximum period we should interpolate in case of missing state-vectors (deltaT in minutes)
-deltaT_min = 10
 
 # -----------------------------------------------------------------------------
 # Default / Automatic parameters
 # -----------------------------------------------------------------------------
-def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, deltaT_min = 10, spark = None):
-    resolution = select_resolution(distance_nm)
+def CloseEncountersH3HalfDisk(coords_df, distance_nm = 5, FL_diff = 10, FL_min = 245, deltaT_min = 10, pnumb = 100, spark = None):
+    resolution = select_resolution_half_disk(distance_nm)
     earth_radius_km = 6378
     print(f"The selected resolution for a distance of {distance_nm} NM is: {resolution}")
 
@@ -50,7 +35,7 @@ def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
     # Load and Filter Data
     # -----------------------------------------------------------------------------
     coords_df = coords_df[coords_df.FLIGHT_LEVEL > FL_min]
-    coords_df = coords_df[['FLIGHT_ID', 'LONGITUDE', 'LATITUDE', 'TIME_OVER', 'FLIGHT_LEVEL']].rename(
+    coords_df = coords_df[['FLIGHT_ID', 'LONGITUDE', 'LATITUDE', 'TIME_OVER', 'FLIGHT_LEVEL', 'ICAO24']].rename(
         columns={
             'LATITUDE': 'latitude', 
             'LONGITUDE': 'longitude'
@@ -65,9 +50,9 @@ def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
     # Resample and interpolate
     # -----------------------------------------------------------------------------
 
-    coords_df = TSDF(coords_df, ts_col="time_over", partition_cols = ["flight_id"])
+    coords_df = TSDF(coords_df, ts_col="time_over", partition_cols = ["flight_id", "icao24"])
     coords_df = coords_df.resample(freq="5 sec", func="mean").interpolate(method='linear', freq="5 sec", show_interpolated = True).df
-    coords_df = coords_df.repartition(100, ["flight_id"])
+    coords_df = coords_df.repartition(pnumb, ["flight_id"])
     #print(f"Number of rows after resamplin and interpolating: {coords_df.count()}")
 
     # -----------------------------------------------------------------------------
@@ -116,38 +101,34 @@ def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
     )
 
     # Drop helper columns
-    coords_df = coords_df.drop("interpolation_group_change", "interpolation_group_id",
-                            "group_start_time", "group_end_time", "interpolation_group_duration_sec")
+    coords_df = coords_df.drop(
+        "interpolation_group_change", 
+        "interpolation_group_id",
+        "group_start_time", 
+        "group_end_time", 
+        "interpolation_group_duration_sec",
+        "is_interpolated_flight_level", 
+        "is_interpolated_latitude", 
+        "is_interpolated_longitude")
 
     # Add a segment ID
     coords_df = coords_df.withColumn("segment_id", monotonically_increasing_id())
-    coords_df = coords_df.repartition(100, ["flight_id", "segment_id"])
-
-    #coords_df = coords_df.filter(col('time_over')==datetime(2024,7,1,12,1,0))
-    coords_df.cache() # Keep, this is needed to persist the IDs
+    coords_df = coords_df.repartition(pnumb, ["flight_id", "segment_id"])
+    coords_df.cache() # Keep, this is needed to persist the IDs and speed up further calculations
     coords_df.count()
-
-    # -----------------------------------------------------------------------------
-    # Define UDFs for H3
-    # -----------------------------------------------------------------------------
-    def lat_lon_to_h3(lat, lon, resolution):
-        return h3.latlng_to_cell(lat, lon, resolution)
-
-    def grid_disk_k1(cell):
-        return h3.grid_disk(cell, k=1)
-
-    lat_lon_to_h3_udf = udf(lat_lon_to_h3, StringType())
-    grid_disk_k1_udf = udf(grid_disk_k1, ArrayType(StringType()))
 
     # Add H3 index and neighbors
     coords_df = coords_df.withColumn("h3_index", lat_lon_to_h3_udf(col("latitude"), col("longitude"), lit(resolution)))
-    coords_df = coords_df.withColumn("h3_neighbours", grid_disk_k1_udf(col("h3_index")))
+    coords_df = coords_df.withColumn("h3_neighbours", get_half_disk_udf(col("h3_index")))
+
+    
 
     # -----------------------------------------------------------------------------
     # Explode neighbors and group by time_over and h3_neighbour to collect IDs when there's multiple FLIGHT_ID in a cell
     # -----------------------------------------------------------------------------
     exploded_df = coords_df.withColumn("h3_neighbour", explode(col("h3_neighbours")))
     #print(f"Exploded df nrow = {exploded_df.count()}")
+
     grouped_df = (exploded_df.groupBy(["time_over", "h3_neighbour"])
                 .agg(F.countDistinct("flight_id").alias("flight_count"),
                     F.collect_list("segment_id").alias("id_list"))
@@ -159,8 +140,14 @@ def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
     # -----------------------------------------------------------------------------
     # Create pairwise combinations using self-join on indexed exploded DataFrame
     # -----------------------------------------------------------------------------
-    # Explode id_list to individual rows and add index within each h3 group
-    df_exploded = grouped_df.withColumn("segment_id", explode("id_list")).drop('id_list')
+    # Explode id_list to individual rows 
+    df_exploded = grouped_df.withColumn("segment_id", explode("id_list")).drop("id_list")
+    
+    # Add back the flight_level as it will speed up self-joins
+    segment_meta_df = coords_df.select("segment_id", "flight_level", "flight_id")
+    df_exploded = df_exploded.join(segment_meta_df, on="segment_id", how="left")
+
+    # Add index within each h3 group
     window_spec = Window.partitionBy(["time_over","h3_neighbour"]).orderBy("segment_id")
     df_indexed = df_exploded.withColumn("idx", F.row_number().over(window_spec))
 
@@ -170,6 +157,7 @@ def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
         .join(
             df_indexed.alias("df2"),
             (F.col("df1.time_over") == F.col("df2.time_over")) &
+            (F.abs(F.col("df1.flight_level") - F.col("df2.flight_level")) < FL_diff) &
             (F.col("df1.h3_neighbour") == F.col("df2.h3_neighbour")) &
             (F.col("df1.idx") < F.col("df2.idx"))
         )
@@ -208,7 +196,8 @@ def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
         .withColumnRenamed("time_over", "time1") \
         .withColumnRenamed("flight_level", 'flight_lvl1') \
         .withColumnRenamed("flight_id", "flight_id1") \
-        .select("ID1", "lat1", "lon1", "time1", "flight_lvl1", "flight_id1")
+        .withColumnRenamed("icao24", "icao241") \
+        .select("ID1", "lat1", "lon1", "time1", "flight_lvl1", "flight_id1", "icao241")
 
     coords_sdf2 = coords_df.withColumnRenamed("segment_id", "ID2") \
         .withColumnRenamed("latitude", "lat2") \
@@ -216,10 +205,11 @@ def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
         .withColumnRenamed("time_over", "time2") \
         .withColumnRenamed("flight_level", 'flight_lvl2') \
         .withColumnRenamed("flight_id", "flight_id2") \
-        .select("ID2", "lat2", "lon2", "time2", "flight_lvl2", "flight_id2")
+        .withColumnRenamed("icao24", "icao242") \
+        .select("ID2", "lat2", "lon2", "time2", "flight_lvl2", "flight_id2", "icao242")
 
-    coords_sdf1 = coords_sdf1.repartition(100, "ID1")
-    coords_sdf2 = coords_sdf2.repartition(100, "ID2")
+    coords_sdf1 = coords_sdf1.repartition(pnumb, "ID1")
+    coords_sdf2 = coords_sdf2.repartition(pnumb, "ID2")
 
     df_pairs = df_pairs.join(coords_sdf1, on="ID1", how="left")
     df_pairs = df_pairs.join(coords_sdf2, on="ID2", how="left")
@@ -244,21 +234,29 @@ def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
     # Calulate and filter based on distance (km)
     # -----------------------------------------------------------------------------
     #df_pairs.cache()
+
+    df_pairs = df_pairs.withColumn("lat1_rad", radians(col("lat1"))) \
+                   .withColumn("lat2_rad", radians(col("lat2"))) \
+                   .withColumn("lon1_rad", radians(col("lon1"))) \
+                   .withColumn("lon2_rad", radians(col("lon2")))
+
     df_pairs = df_pairs.withColumn(
         "distance_nm",
         0.539957 * 2 * earth_radius_km * atan2(
             sqrt(
-                (sin(radians(col("lat2")) - radians(col("lat1"))) / 2)**2 +
-                cos(radians(col("lat1"))) * cos(radians(col("lat2"))) *
-                (sin(radians(col("lon2")) - radians(col("lon1"))) / 2)**2
+                (sin(col('lat2_rad') - col('lat1_rad')) / 2)**2 +
+                cos(col('lat1_rad')) * cos(col('lat2_rad')) *
+                (sin(col('lon2_rad') - col('lon1_rad')) / 2)**2
             ),
             sqrt(1 - (
-                (sin(radians(col("lat2")) - radians(col("lat1"))) / 2)**2 +
-                cos(radians(col("lat1"))) * cos(radians(col("lat2"))) *
-                (sin(radians(col("lon2")) - radians(col("lon1"))) / 2)**2
+                (sin(col('lat2_rad') - col('lat1_rad')) / 2)**2 +
+                cos(col('lat1_rad')) * cos(col('lat2_rad')) *
+                (sin(col('lon2_rad') - col('lon1_rad')) / 2)**2
             ))
         )
     )
+
+    df_pairs = df_pairs.drop('lat1_rad', 'lat2_rad', 'lon1_rad', 'lon2_rad')
 
     df_pairs = df_pairs.filter(col('distance_nm') <= lit(distance_nm))
 
@@ -270,3 +268,5 @@ def CloseEncountersH3(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
     df = df_pairs.toPandas()
     print(f"Number of unique ID pairs: {df.shape[0]}")
     return df
+
+

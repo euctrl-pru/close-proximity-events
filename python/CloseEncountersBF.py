@@ -68,7 +68,7 @@ def CloseEncountersBF(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
     coords_df = TSDF(coords_df, ts_col="time_over", partition_cols = ["flight_id"])
     coords_df = coords_df.resample(freq="5 sec", func="mean").interpolate(method='linear', freq="5 sec", show_interpolated = True).df
     coords_df = coords_df.repartition(100, ["flight_id"])
-    print(f"Number of rows after resamplin and interpolating: {coords_df.count()}")
+    #print(f"Number of rows after resamplin and interpolating: {coords_df.count()}")
 
     # -----------------------------------------------------------------------------
     # Delete resampled periods which are longer than DeltaT = 10 min
@@ -124,7 +124,7 @@ def CloseEncountersBF(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
     coords_df = coords_df.repartition(100, ["flight_id", "segment_id"])
 
     #coords_df = coords_df.filter(col('time_over')==datetime(2024,7,1,12,1,0))
-    coords_df.cache()
+    coords_df.cache() # Keep, this is needed to persist the IDs
     coords_df.count()
 
     # -----------------------------------------------------------------------------
@@ -149,8 +149,8 @@ def CloseEncountersBF(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
             F.col("df2.segment_id").alias("ID2")
         )
     )
-    df_pairs.cache()
-    print(f"Number of generated pairs: {df_pairs.count()}")
+    #df_pairs.cache()
+    #print(f"Number of generated pairs: {df_pairs.count()}")
     # -----------------------------------------------------------------------------
     # Clean Pairs, Create Unique Pair ID
     # -----------------------------------------------------------------------------
@@ -184,27 +184,26 @@ def CloseEncountersBF(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
 
     df_pairs = df_pairs.join(coords_sdf1, on="ID1", how="left")
     df_pairs = df_pairs.join(coords_sdf2, on="ID2", how="left")
-    df_pairs.cache()
-    print(f"Number of pairs (raw): {df_pairs.count()}")
+    #df_pairs.cache()
+    #print(f"Number of pairs (raw): {df_pairs.count()}")
     # -----------------------------------------------------------------------------
     # Calculate and filter based on time differense (s)
     # -----------------------------------------------------------------------------
     df_pairs = df_pairs.withColumn('time_diff_s', F.unix_timestamp(F.col("time1")) - F.unix_timestamp(F.col("time2")))
     df_pairs = df_pairs.filter(F.abs(F.col('time_diff_s')) == 0)
-    df_pairs.cache()
-    print(f"Number of pairs after time filter {df_pairs.count()}")
+    #df_pairs.cache()
+    #print(f"Number of pairs after time filter {df_pairs.count()}")
     # -----------------------------------------------------------------------------
     # Calculate and filter based on height differense (s)
     # -----------------------------------------------------------------------------
     df_pairs = df_pairs.withColumn('FL_diff', F.col("flight_lvl1") - F.col("flight_lvl2"))
     df_pairs = df_pairs.filter(F.abs(F.col('FL_diff')) < lit(FL_diff))
-    df_pairs.cache()
-    print(f"Number of pairs after FL filter {df_pairs.count()}")
+    #df_pairs.cache()
+    #print(f"Number of pairs after FL filter {df_pairs.count()}")
 
     # -----------------------------------------------------------------------------
     # Calulate and filter based on distance (km)
     # -----------------------------------------------------------------------------
-    df_pairs.cache()
     df_pairs = df_pairs.withColumn(
         "distance_nm",
         0.539957 * 2 * earth_radius_km * atan2(
@@ -227,7 +226,6 @@ def CloseEncountersBF(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, del
     # # Fetch sample
     # # -----------------------------------------------------------------------------
 
-    df_pairs.cache()
     df = df_pairs.toPandas()
-    print(f"Number of unique ID pairs: {df_pairs.count()}")
-    return df_pairs
+    print(f"Number of unique ID pairs: {df.shape[0]}")
+    return df
