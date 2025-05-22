@@ -4,12 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "close-encounters"
-version = "0.0.6"
+version = "0.0.7"
 description = "A Python module for analyzing close flight encounters using H3."
 readme = {file = "README.md", content-type = "text/markdown"}
-authors = [{ name = "Quinten Goens", email = "quinten.goens@eurocontrol.int" },{ name = "Esther Calvo Fernandez", email = "esther.calvo-fernandez@eurocontrol.int" }]
+authors = [
+  { name = "Quinten Goens", email = "quinten.goens@eurocontrol.int" },
+  { name = "Esther Calvo Fernandez", email = "esther.calvo-fernandez@eurocontrol.int" }
+]
 license = {text = "MIT"}
-dependencies = ["h3==4.2.2", "tempo==0.12"]
+dependencies = [
+    "h3==4.2.2", 
+    "tempo==0.12"]
 requires-python = ">=3.8"
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -20,10 +25,21 @@ classifiers = [
   "Programming Language :: Python :: 3.8",
   "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11"
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12"
 ]
-keywords = ["aviation", "h3", "smi", "flights", "trajectories", "fixed-radius-near-neighbours", "encounter-detection", "close-encounters"]
-maintainers = [{ name = "Quinten Goens", email = "quinten.goens@eurocontrol.int" }]
+keywords = [
+  "aviation", "h3", "smi", "flights", "trajectories",
+  "fixed-radius-near-neighbours", "encounter-detection", "close-encounters"
+]
+maintainers = [
+  { name = "Quinten Goens", email = "quinten.goens@eurocontrol.int" }
+]
+
+[project.urls]
+Homepage = "https://github.com/euctrl-pru/close-encounters"
+Repository = "https://github.com/euctrl-pru/close-encounters.git"
+Issues = "https://github.com/euctrl-pru/close-encounters/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -31,7 +47,5 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[project.urls]
-Homepage = "https://github.com/euctrl-pru/close-encounters"
-Repository = "https://github.com/euctrl-pru/close-encounters.git"
-Issues = "https://github.com/euctrl-pru/close-encounters/issues"
+[tool.setuptools.package-data]
+"close_encounters" = ["data/h3_edgelengths.csv", "data/sample_trajectories.parquet"]

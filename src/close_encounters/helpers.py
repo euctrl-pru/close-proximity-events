@@ -4,12 +4,10 @@ import h3
 from pyspark.sql.functions import udf
 from pyspark.sql.types import (
     StringType, ArrayType )
-import os
 
-package_dir = os.path.dirname(os.path.abspath(__file__))
-data_path = os.path.join(package_dir, '..', '..', 'data', 'edgelengths.csv')
-data_path = os.path.normpath(data_path)
-h3_df = pd.read_csv(data_path)
+import importlib.resources as pkg_resources
+with pkg_resources.files('close_encounters.data').joinpath('h3_edgelengths.csv').open('r') as f:
+    h3_df = pd.read_csv(f)
 
 h3_df = h3_df[['res', 'Min Edge Length km (Hex)']]
 h3_df = h3_df.rename({'Min Edge Length km (Hex)':'min_edge_length_km'}, axis = 1)
