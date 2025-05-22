@@ -23,7 +23,6 @@
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
 [![MIT License (MIT)][license-shield]][license-url]
-[![LinkedIn][linkedin-shield]][linkedin-url]
 
 
 
@@ -31,7 +30,7 @@
 <br />
 <div align="center">
   <a href="https://github.com/euctrl-pru/close-encounters">
-    <img src="images/logo.svg" alt="Logo" width="80" height="80">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/b/b2/Eurocontrol_logo_2010.svg" alt="Logo" width="80" height="80">
   </a>
 
 <h3 align="center">Close Encounters</h3>
