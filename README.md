@@ -30,7 +30,7 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/euctrl-pru/close_encounters">
+  <a href="https://github.com/euctrl-pru/close-encounters">
     <img src="images/logo.svg" alt="Logo" width="80" height="80">
   </a>
 
@@ -39,14 +39,14 @@
   <p align="center">
 The close encounters Python package implements a fixed radius near neighbour search using (Uber's H3) cell techniques. Given a set of (aircraft) trajectories, it determines the optimal H3 resolution to work at given the fixed radius, interpolates and resamples (5s) the trajectories, adds Uber H3 indexes for each lat/lon at the optimal resolution and lastly applies the fixed radius near neighbour search cell techniques. At last, the Haversine distance is calculated between neighbours and filtered down to the fixed radius. 
     <br />
-    <a href="https://github.com/euctrl-pru/close_encounters"><strong>Explore the docs »</strong></a>
+    <a href="https://github.com/euctrl-pru/close-encounters"><strong>Explore the docs »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/euctrl-pru/close_encounters">View Repo</a>
+    <a href="https://github.com/euctrl-pru/close-encounters">View Repo</a>
     &middot;
-    <a href="https://github.com/euctrl-pru/close_encounters/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
+    <a href="https://github.com/euctrl-pru/close-encounters/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
     &middot;
-    <a href="https://github.com/euctrl-pru/close_encounters/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
+    <a href="https://github.com/euctrl-pru/close-encounters/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
   </p>
 </div>
 
@@ -131,16 +131,16 @@ pip install pyspark==3.2.3
 
 By HTTPS:
 ```sh
-git clone https://github.com/euctrl-pru/close_encounters.git
+git clone https://github.com/euctrl-pru/close-encounters.git
 ```
 Or by SSH:
 ```sh
-git clone git@github.com:euctrl-pru/close_encounters.git 
+git clone git@github.com:euctrl-pru/close-encounters.git 
 ```
 
 2. PIP install cloned library locally
 ```sh
-cd close_encounters && pip install -e .
+cd close-encounters && pip install -e .
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -153,7 +153,7 @@ cd close_encounters && pip install -e .
 Once installed, you can run the code as follows: 
 
 ```python
-from close_encounters.h3_half_disk import *
+from close-encounters.h3_half_disk import *
 
 spark = SparkSession.builder \
     .appName("CloseEncountersH3") \
@@ -175,7 +175,7 @@ encounters_df = CloseEncountersH3HalfDisk(coords_df, distance_nm = 5, FL_diff = 
 - [x] Feature 1: Create a PIP Package
 - [ ] Feature 2: Clean up and streamline code 
 
-See the [open issues](https://github.com/euctrl-pru/close_encounters/issues) for a full list of proposed features (and known issues).
+See the [open issues](https://github.com/euctrl-pru/close-encounters/issues) for a full list of proposed features (and known issues).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -206,7 +206,7 @@ Distributed under the MIT License (MIT). See `LICENSE.txt` for more information.
 Quinten GOENS, Aviation Intelligence Unit at [EUROCONTROL](https://www.eurocontrol.int) 
 * Email: [quinten.goens@eurocontrol.int](mailto:quinten.goens@eurocontrol.int) 
 
-Project Link: [https://github.com/euctrl-pru/close_encounters](https://github.com/euctrl-pru/close_encounters)
+Project Link: [https://github.com/euctrl-pru/close-encounters](https://github.com/euctrl-pru/close-encounters)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -220,16 +220,16 @@ Project Link: [https://github.com/euctrl-pru/close_encounters](https://github.co
 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-[contributors-shield]: https://img.shields.io/github/contributors/euctrl-pru/close_encounters.svg?style=for-the-badge
-[contributors-url]: https://github.com/euctrl-pru/close_encounters/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/euctrl-pru/close_encounters.svg?style=for-the-badge
-[forks-url]: https://github.com/euctrl-pru/close_encounters/network/members
-[stars-shield]: https://img.shields.io/github/stars/euctrl-pru/close_encounters.svg?style=for-the-badge
-[stars-url]: https://github.com/euctrl-pru/close_encounters/stargazers
-[issues-shield]: https://img.shields.io/github/issues/euctrl-pru/close_encounters.svg?style=for-the-badge
-[issues-url]: https://github.com/euctrl-pru/close_encounters/issues
-[license-shield]: https://img.shields.io/github/license/euctrl-pru/close_encounters.svg?style=for-the-badge
-[license-url]: https://github.com/euctrl-pru/close_encounters/blob/master/LICENSE.txt
+[contributors-shield]: https://img.shields.io/github/contributors/euctrl-pru/close-encounters.svg?style=for-the-badge
+[contributors-url]: https://github.com/euctrl-pru/close-encounters/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/euctrl-pru/close-encounters.svg?style=for-the-badge
+[forks-url]: https://github.com/euctrl-pru/close-encounters/network/members
+[stars-shield]: https://img.shields.io/github/stars/euctrl-pru/close-encounters.svg?style=for-the-badge
+[stars-url]: https://github.com/euctrl-pru/close-encounters/stargazers
+[issues-shield]: https://img.shields.io/github/issues/euctrl-pru/close-encounters.svg?style=for-the-badge
+[issues-url]: https://github.com/euctrl-pru/close-encounters/issues
+[license-shield]: https://img.shields.io/github/license/euctrl-pru/close-encounters.svg?style=for-the-badge
+[license-url]: https://github.com/euctrl-pru/close-encounters/blob/master/LICENSE.txt
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
 [linkedin-url]: https://linkedin.com/in/quinten-goens
 [product-screenshot]: images/screenshot.png
