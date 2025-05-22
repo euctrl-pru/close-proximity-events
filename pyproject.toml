@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "Close Encounters"
+name = "close-encounters"
 version = "0.0.4"
 description = "A Python module for analyzing close flight encounters using H3."
 readme = {file = "README.md", content-type = "text/markdown"}
