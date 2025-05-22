@@ -22,3 +22,14 @@ def load_h3_edgelengths() -> pd.DataFrame:
     data_path = files('close_encounters.data').joinpath('h3_edgelengths.csv')
     with data_path.open("rb") as f:
         return pd.read_csv(f)
+
+def load_kepler_config() -> pd.DataFrame:
+    """
+    Load the the Kepler.gl config template bundled with the package.
+
+    Returns:
+        pd.DataFrame: A dictionary containing the Kepler.gl config template.
+    """
+    data_path = files('close_encounters.resources').joinpath('kepler-config.json')
+    with data_path.open("rb") as json_file:
+        return json.load(json_file)

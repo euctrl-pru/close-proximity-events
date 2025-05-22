@@ -16,7 +16,9 @@ dependencies = [
     "h3==4.2.2", 
     "tempo==0.12",
     "pyarrow", 
-    "tempo"]
+    "dbl-tempo==0.1.29",
+    "scipy==1.15.2",
+    "keplergl==0.3.7"]
 requires-python = ">=3.8"
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -50,4 +52,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"close_encounters" = ["data/h3_edgelengths.csv", "data/sample_trajectories.parquet"]
+"close_encounters" = ["data/h3_edgelengths.csv", "data/sample_trajectories.parquet", "resources/kepler-config.json"]

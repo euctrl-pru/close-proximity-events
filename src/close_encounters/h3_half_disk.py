@@ -266,6 +266,8 @@ def CloseEncountersH3HalfDisk(coords_df, distance_nm = 5, FL_diff = 10, FL_min =
 
     #df_pairs.cache()
     df = df_pairs.toPandas()
+    df['flight_id1'] = df['flight_id1'].apply(lambda l: f'ID_{round(l)}')
+    df['flight_id2'] = df['flight_id2'].apply(lambda l: f'ID_{round(l)}')
     print(f"Number of unique ID pairs: {df.shape[0]}")
     return df
 
