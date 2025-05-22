@@ -4,11 +4,9 @@ import h3
 from pyspark.sql.functions import udf
 from pyspark.sql.types import (
     StringType, ArrayType )
+from .datasets import *
 
-import importlib.resources as pkg_resources
-with pkg_resources.files('close_encounters.data').joinpath('h3_edgelengths.csv').open('r') as f:
-    h3_df = pd.read_csv(f)
-
+h3_df = load_h3_edgelengths() 
 h3_df = h3_df[['res', 'Min Edge Length km (Hex)']]
 h3_df = h3_df.rename({'Min Edge Length km (Hex)':'min_edge_length_km'}, axis = 1)
 h3_df['min_edge_length_NM'] = h3_df['min_edge_length_km'] / 1.852
