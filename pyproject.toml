@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "close_encounters"
+version = "0.0.1"
+description = "A Python module for analyzing close flight encounters using H3."
+authors = [{ name = "Quinten Goens", email = "quinten.goens@eurocontrol.int" }]
+dependencies = ["h3==4.2.2", "tempo==0.12"]#, "pyspark==3.2.3"]  # Add required dependencies like h3, pandas, etc. here
+requires-python = ">=3.8"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
