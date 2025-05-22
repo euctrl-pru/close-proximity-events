@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Close Encounters"
-version = "0.0.3"
+version = "0.0.4"
 description = "A Python module for analyzing close flight encounters using H3."
 readme = {file = "README.md", content-type = "text/markdown"}
 authors = [{ name = "Quinten Goens", email = "quinten.goens@eurocontrol.int" },{ name = "Esther Calvo Fernandez", email = "esther.calvo-fernandez@eurocontrol.int" }]
