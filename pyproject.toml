@@ -6,12 +6,32 @@ build-backend = "setuptools.build_meta"
 name = "Close Encounters"
 version = "0.0.3"
 description = "A Python module for analyzing close flight encounters using H3."
-authors = [{ name = "Quinten Goens", email = "quinten.goens@eurocontrol.int" }]
-dependencies = ["h3==4.2.2", "tempo==0.12"]#, "pyspark==3.2.3"]  # Add required dependencies like h3, pandas, etc. here
+readme = {file = "README.md", content-type = "text/markdown"}
+authors = [{ name = "Quinten Goens", email = "quinten.goens@eurocontrol.int" },{ name = "Esther Calvo Fernandez", email = "esther.calvo-fernandez@eurocontrol.int" }]
+license = {text = "MIT"}
+dependencies = ["h3==4.2.2", "tempo==0.12"]
 requires-python = ">=3.8"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11"
+]
+keywords = ["aviation", "h3", "smi", "flights", "trajectories", "fixed-radius-near-neighbours", "encounter-detection", "close-encounters"]
+maintainers = [{ name = "Quinten Goens", email = "quinten.goens@eurocontrol.int" }]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.urls]
+Homepage = "https://github.com/euctrl-pru/close-encounters"
+Repository = "https://github.com/euctrl-pru/close-encounters.git"
+Issues = "https://github.com/euctrl-pru/close-encounters/issues"
