@@ -15,7 +15,8 @@ license = {text = "MIT"}
 dependencies = [
     "h3==4.2.2", 
     "tempo==0.12",
-    "pyarrow"]
+    "pyarrow", 
+    "tempo"]
 requires-python = ">=3.8"
 classifiers = [
   "Development Status :: 3 - Alpha",
