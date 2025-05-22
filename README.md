@@ -37,7 +37,7 @@
 <h3 align="center">Close Encounters</h3>
 
   <p align="center">
-The close encounters Python package implements a fixed radius near neighbour search using (Uber's H3) cell techniques. Given a set of (aircraft) trajectories, it determines the optimal H3 resolution to work at given the fixed radius, interpolates and resamples (5s) the trajectories, adds Uber H3 indexes for each lat/lon at the optimal resolution and lastly applies the fixed radius near neighbour search cell techniques. 
+The close encounters Python package implements a fixed radius near neighbour search using (Uber's H3) cell techniques. Given a set of (aircraft) trajectories, it determines the optimal H3 resolution to work at given the fixed radius, interpolates and resamples (5s) the trajectories, adds Uber H3 indexes for each lat/lon at the optimal resolution and lastly applies the fixed radius near neighbour search cell techniques. At last, the Haversine distance is calculated between neighbours and filtered down to the fixed radius. 
     <br />
     <a href="https://github.com/euctrl-pru/close_encounters"><strong>Explore the docs »</strong></a>
     <br />
