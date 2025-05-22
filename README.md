@@ -22,7 +22,7 @@
 [![Forks][forks-shield]][forks-url]
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
-[![project_license][license-shield]][license-url]
+[![MIT License (MIT)][license-shield]][license-url]
 [![LinkedIn][linkedin-shield]][linkedin-url]
 
 
@@ -42,7 +42,7 @@ The close encounters Python package implements a fixed radius near neighbour sea
     <a href="https://github.com/euctrl-pru/close_encounters"><strong>Explore the docs »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/euctrl-pru/close_encounters">View Demo</a>
+    <a href="https://github.com/euctrl-pru/close_encounters">View Repo</a>
     &middot;
     <a href="https://github.com/euctrl-pru/close_encounters/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
     &middot;
@@ -83,63 +83,64 @@ The close encounters Python package implements a fixed radius near neighbour sea
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-[![Product Name Screen Shot][product-screenshot]](https://example.com)
-
-Here's a blank template to get started. To avoid retyping too much info, do a search and replace with your text editor for the following: `euctrl-pru`, `close_encounters`, `twitter_handle`, `linkedin_username`, `email_client`, `email`, `project_title`, `project_description`, `project_license`
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
+<!--[![Product Name Screen Shot][product-screenshot]](https://example.com)-->
 
 ### Built With
 
-* [![Next][Next.js]][Next-url]
-* [![React][React.js]][React-url]
-* [![Vue][Vue.js]][Vue-url]
-* [![Angular][Angular.io]][Angular-url]
-* [![Svelte][Svelte.dev]][Svelte-url]
-* [![Laravel][Laravel.com]][Laravel-url]
-* [![Bootstrap][Bootstrap.com]][Bootstrap-url]
-* [![JQuery][JQuery.com]][JQuery-url]
+* [![Python][Python.org]][Python-url]
+* [![PySpark][PySpark-logo]][PySpark-url]
+* [![H3][H3-logo]][H3-url]
+* [![NumPy][NumPy-logo]][NumPy-url]
+* [![Pandas][Pandas-logo]][Pandas-url]
+
+<!-- Badge Image References -->
+[Python.org]: https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white
+[PySpark-logo]: https://img.shields.io/badge/PySpark-E25A1C?style=for-the-badge&logo=apachespark&logoColor=white
+[H3-logo]: https://img.shields.io/badge/H3-0066CC?style=for-the-badge&logo=hexo&logoColor=white
+[NumPy-logo]: https://img.shields.io/badge/NumPy-013243?style=for-the-badge&logo=numpy&logoColor=white
+[Pandas-logo]: https://img.shields.io/badge/Pandas-150458?style=for-the-badge&logo=pandas&logoColor=white
+
+<!-- Badge URL References -->
+[Python-url]: https://www.python.org/
+[PySpark-url]: https://spark.apache.org/docs/latest/api/python/
+[H3-url]: https://github.com/uber/h3-py
+[NumPy-url]: https://numpy.org/
+[Pandas-url]: https://pandas.pydata.org/
+
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
 
 <!-- GETTING STARTED -->
 ## Getting Started
 
-This is an example of how you may give instructions on setting up your project locally.
-To get a local copy up and running follow these simple example steps.
+To get started make sure you have `python >= 3.12` and `pyspark>=3.2.3` installed.  
 
 ### Prerequisites
 
 This is an example of how to list things you need to use the software and how to install them.
-* npm
-  ```sh
-  npm install npm@latest -g
-  ```
+* Python: Download [here](https://www.python.org/downloads/)
+* Python dependencies:
+  
+```sh
+pip install pyspark==3.2.3 
+```
 
 ### Installation
 
-1. Get a free API Key at [https://example.com](https://example.com)
-2. Clone the repo
-   ```sh
-   git clone https://github.com/euctrl-pru/close_encounters.git
-   ```
-3. Install NPM packages
-   ```sh
-   npm install
-   ```
-4. Enter your API in `config.js`
-   ```js
-   const API_KEY = 'ENTER YOUR API';
-   ```
-5. Change git remote url to avoid accidental pushes to base project
-   ```sh
-   git remote set-url origin euctrl-pru/close_encounters
-   git remote -v # confirm the changes
-   ```
+1. Clone the repo
+By HTTPS:
+```sh
+git clone https://github.com/euctrl-pru/close_encounters.git
+```
+Or by SSH:
+```sh
+git clone git@github.com:euctrl-pru/close_encounters.git 
+```
+
+3. PIP install cloned library locally
+```sh
+cd close_encounters && pip install -e .
+```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -148,32 +149,37 @@ This is an example of how to list things you need to use the software and how to
 <!-- USAGE EXAMPLES -->
 ## Usage
 
-Use this space to show useful examples of how a project can be used. Additional screenshots, code examples and demos work well in this space. You may also link to more resources.
+Once installed, you can run the code as follows: 
 
-_For more examples, please refer to the [Documentation](https://example.com)_
+```python
+from close_encounters.h3_half_disk import *
+
+spark = SparkSession.builder \
+    .appName("CloseEncountersH3") \
+    .config("spark.driver.memory", "8g") \
+    .config("spark.executor.memory", "8g") \
+    .config("spark.executor.cores", "2") \
+    .config("spark.sql.shuffle.partitions", "20") \
+    .config("spark.rpc.message.maxSize", "256") \
+    .getOrCreate()
+
+encounters_df = CloseEncountersH3HalfDisk(coords_df, distance_nm = 5, FL_diff = 10, FL_min = 245, deltaT_min = 10, pnumb = 100, spark = spark)
+```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
 
 <!-- ROADMAP -->
 ## Roadmap
 
-- [ ] Feature 1
-- [ ] Feature 2
-- [ ] Feature 3
-    - [ ] Nested Feature
+- [x] Feature 1: Create a PIP Package
+- [ ] Feature 2: Clean up and streamline code 
 
 See the [open issues](https://github.com/euctrl-pru/close_encounters/issues) for a full list of proposed features (and known issues).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-
-
 <!-- CONTRIBUTING -->
 ## Contributing
-
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
 
 If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
 Don't forget to give the project a star! Thanks again!
@@ -186,44 +192,30 @@ Don't forget to give the project a star! Thanks again!
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-### Top contributors:
-
-<a href="https://github.com/euctrl-pru/close_encounters/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=euctrl-pru/close_encounters" alt="contrib.rocks image" />
-</a>
-
-
-
 <!-- LICENSE -->
 ## License
 
-Distributed under the project_license. See `LICENSE.txt` for more information.
+Distributed under the MIT License (MIT). See `LICENSE.txt` for more information.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
 
 <!-- CONTACT -->
 ## Contact
 
-Your Name - [@twitter_handle](https://twitter.com/twitter_handle) - email@email_client.com
+Quinten GOENS, Aviation Intelligence Unit at [EUROCONTROL](https://www.eurocontrol.int) 
+* Email: [quinten.goens@eurocontrol.int](mailto:quinten.goens@eurocontrol.int) 
 
 Project Link: [https://github.com/euctrl-pru/close_encounters](https://github.com/euctrl-pru/close_encounters)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-
-
 <!-- ACKNOWLEDGMENTS -->
 ## Acknowledgments
 
-* []()
-* []()
-* []()
+* [Performance Review Commission (PRC)](https://www.eurocontrol.int/air-navigation-services-performance-review)
+* [EUROCONTROL](https://www.eurocontrol.int)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
@@ -238,7 +230,7 @@ Project Link: [https://github.com/euctrl-pru/close_encounters](https://github.co
 [license-shield]: https://img.shields.io/github/license/euctrl-pru/close_encounters.svg?style=for-the-badge
 [license-url]: https://github.com/euctrl-pru/close_encounters/blob/master/LICENSE.txt
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
-[linkedin-url]: https://linkedin.com/in/linkedin_username
+[linkedin-url]: https://linkedin.com/in/quinten-goens
 [product-screenshot]: images/screenshot.png
 [Next.js]: https://img.shields.io/badge/next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white
 [Next-url]: https://nextjs.org/
