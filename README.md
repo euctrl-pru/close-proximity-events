@@ -128,6 +128,7 @@ pip install pyspark==3.2.3
 ### Installation
 
 1. Clone the repo
+
 By HTTPS:
 ```sh
 git clone https://github.com/euctrl-pru/close_encounters.git
@@ -137,7 +138,7 @@ Or by SSH:
 git clone git@github.com:euctrl-pru/close_encounters.git 
 ```
 
-3. PIP install cloned library locally
+2. PIP install cloned library locally
 ```sh
 cd close_encounters && pip install -e .
 ```
