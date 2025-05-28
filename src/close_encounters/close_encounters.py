@@ -289,12 +289,13 @@ class CloseEncounters:
         if (method == 'half_disk'):
             
             resolution = self._select_resolution_half_disk(h_dist_NM = h_dist_NM)
+
+            # Cutoff 
+            resampled_co = self.resampled_sdf.filter(col('flight_level') >= lit(v_cutoff_FL))
             
             # Add H3 index and neighbors
-            resampled_w_h3 = self.resampled_sdf.withColumn("h3_index", lat_lon_to_h3_udf(col("latitude"), col("longitude"), lit(resolution)))
+            resampled_w_h3 = resampled_co.withColumn("h3_index", lat_lon_to_h3_udf(col("latitude"), col("longitude"), lit(resolution)))
             resampled_w_h3 = resampled_w_h3.withColumn("h3_neighbours", get_half_disk_udf(col("h3_index")))
-        
-            
         
             # -----------------------------------------------------------------------------
             # Explode neighbors and group by time_over and h3_neighbour to collect IDs when there's multiple FLIGHT_ID in a cell
@@ -317,7 +318,7 @@ class CloseEncounters:
             df_exploded = grouped_df.withColumn("segment_id", explode("id_list")).drop("id_list")
             
             # Add back the flight_level as it will speed up self-joins
-            segment_meta_df = self.resampled.select("segment_id", "flight_level", "flight_id")
+            segment_meta_df = resampled_co.select("segment_id", "flight_level", "flight_id")
             df_exploded = df_exploded.join(segment_meta_df, on="segment_id", how="left")
         
             # Add index within each h3 group
@@ -330,7 +331,7 @@ class CloseEncounters:
                 .join(
                     df_indexed.alias("df2"),
                     (F.col("df1.time_over") == F.col("df2.time_over")) &
-                    (F.abs(F.col("df1.flight_level") - F.col("df2.flight_level")) < FL_diff) &
+                    (F.abs(F.col("df1.flight_level") - F.col("df2.flight_level")) < v_dist_FL) &
                     (F.col("df1.h3_neighbour") == F.col("df2.h3_neighbour")) &
                     (F.col("df1.idx") < F.col("df2.idx"))
                 )
@@ -363,7 +364,7 @@ class CloseEncounters:
             # -----------------------------------------------------------------------------
             # Join with Original Coordinates for Each ID
             # -----------------------------------------------------------------------------
-            coords_sdf1 = self.resampled.withColumnRenamed("segment_id", "ID1") \
+            coords_sdf1 = resampled_co.withColumnRenamed("segment_id", "ID1") \
                 .withColumnRenamed("latitude", "lat1") \
                 .withColumnRenamed("longitude", "lon1") \
                 .withColumnRenamed("time_over", "time1") \
@@ -372,7 +373,7 @@ class CloseEncounters:
                 .withColumnRenamed("icao24", "icao241") \
                 .select("ID1", "lat1", "lon1", "time1", "flight_lvl1", "flight_id1", "icao241")
         
-            coords_sdf2 = self.resampled.withColumnRenamed("segment_id", "ID2") \
+            coords_sdf2 = resampled_co.withColumnRenamed("segment_id", "ID2") \
                 .withColumnRenamed("latitude", "lat2") \
                 .withColumnRenamed("longitude", "lon2") \
                 .withColumnRenamed("time_over", "time2") \
@@ -398,8 +399,8 @@ class CloseEncounters:
             # -----------------------------------------------------------------------------
             # Calculate and filter based on height differense (s)
             # -----------------------------------------------------------------------------
-            df_pairs = df_pairs.withColumn('FL_diff', F.col("flight_lvl1") - F.col("flight_lvl2"))
-            df_pairs = df_pairs.filter(F.abs(F.col('FL_diff')) < lit(FL_diff))
+            df_pairs = df_pairs.withColumn('v_dist_FL', F.col("flight_lvl1") - F.col("flight_lvl2"))
+            df_pairs = df_pairs.filter(F.abs(F.col('v_dist_FL')) < lit(v_dist_FL))
             #df_pairs.cache()
             #print(f"Number of pairs after FL filter {df_pairs.count()}")
         
@@ -414,7 +415,7 @@ class CloseEncounters:
                            .withColumn("lon2_rad", radians(col("lon2")))
         
             df_pairs = df_pairs.withColumn(
-                "distance_nm",
+                "h_dist_NM",
                 0.539957 * 2 * earth_radius_km * atan2(
                     sqrt(
                         (sin(col('lat2_rad') - col('lat1_rad')) / 2)**2 +
@@ -431,7 +432,7 @@ class CloseEncounters:
         
             df_pairs = df_pairs.drop('lat1_rad', 'lat2_rad', 'lon1_rad', 'lon2_rad')
         
-            df_pairs = df_pairs.filter(col('distance_nm') <= lit(distance_nm))
+            df_pairs = df_pairs.filter(col('h_dist_NM') <= lit(h_dist_NM))
         
             # -----------------------------------------------------------------------------
             # Fetch sample
