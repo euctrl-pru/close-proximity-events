@@ -1,0 +1,2 @@
+recursive-include src/close_encounters/data *.csv *.parquet
+recursive-include src/close_encounters/resources *.json
