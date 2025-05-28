@@ -141,7 +141,11 @@ class CloseEncounters:
         return self
 
     def _select_resolution_half_disk(self, h_dist_NM = 5):
-        h3_df_ = self.edge_lengths[self.edge_lengths.min_edge_length_km > h_dist_NM]
+        h3_df = self.edge_lengths
+        h3_df = h3_df[['res', 'Min Edge Length km (Hex)']]
+        h3_df = h3_df.rename({'Min Edge Length km (Hex)':'min_edge_length_km'}, axis = 1)
+        h3_df['min_edge_length_NM'] = h3_df['min_edge_length_km'] / 1.852
+        h3_df_ = h3_df[h3_df.min_edge_length_NM > h_dist_NM]
         return int(max(h3_df_.res.to_list()))
     
     def _load_h3_edgelengths(self) -> pd.DataFrame:
