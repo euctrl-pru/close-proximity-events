@@ -20,13 +20,9 @@ from datetime import datetime
 from .helpers import *
 
 # -----------------------------------------------------------------------------
-# Close encounter default parameters
-# -----------------------------------------------------------------------------
-
-# -----------------------------------------------------------------------------
 # Default / Automatic parameters
 # -----------------------------------------------------------------------------
-def CloseEncountersH3HalfDisk(coords_df, distance_nm = 5, FL_diff = 10, FL_min = 245, deltaT_min = 10, pnumb = 100, spark = None):
+def close_encounters_half_disk(coords_df, distance_nm = 5, FL_diff = 10, FL_min = 245, deltaT_min = 10, pnumb = 100, spark = None):
     resolution = select_resolution_half_disk(distance_nm)
     earth_radius_km = 6378
     print(f"The selected resolution for a distance of {distance_nm} NM is: {resolution}")

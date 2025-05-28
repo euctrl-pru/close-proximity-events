@@ -41,7 +41,7 @@ deltaT_min = 10
 # -----------------------------------------------------------------------------
 # Default / Automatic parameters
 # -----------------------------------------------------------------------------
-def CloseEncountersBF(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, deltaT_min = 10, spark = None):
+def close_encounters_brute_force(coords_df, distance_nm = 5, FL_diff = 9, FL_min = 250, deltaT_min = 10, spark = None):
     resolution = select_resolution(distance_nm)
     earth_radius_km = 6378
     print(f"The selected resolution for a distance of {distance_nm} NM is: {resolution}")
