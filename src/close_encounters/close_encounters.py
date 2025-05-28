@@ -139,18 +139,10 @@ class CloseEncounters:
             flight_level_col = 'FLIGHT_LEVEL'
             )
         return self
-    
 
-    def load_sample_trajectories_pdf(self) -> pd.DataFrame:
-        """
-        Load the sample trajectories dataset bundled with the package.
-    
-        Returns:
-            pd.DataFrame: A DataFrame containing sample flight trajectory data.
-        """
-        data_path = files("close_encounters.data").joinpath("sample_trajectories.parquet")
-        with data_path.open("rb") as f:
-            return pd.read_parquet(f)
+    def _select_resolution_half_disk(self, h_dist_NM = 5):
+        h3_df_ = self.edge_lengths[self.edge_lengths.min_edge_length_km > h_dist_NM]
+        return int(max(h3_df_.res.to_list()))
     
     def _load_h3_edgelengths(self) -> pd.DataFrame:
         """
@@ -283,13 +275,18 @@ class CloseEncounters:
         p_numb=100,
         method='half_disk'
     ):
+
+        # Check if data is there
         if self.traj_sdf is None:
             raise Exception("No trajectories loaded. Use .load_pandas_trajectories or .load_spark_trajectories before trying to find encounters.")
+
+        self.resample(freq_s=freq_s, t_max=t_max, p_numb=p_numb)
         
         if (method == 'half_disk'):
-            self.resample(freq_s=freq_s, t_max=t_max, p_numb=p_numb)
-
-                     # Add H3 index and neighbors
+            
+            resolution = self._select_resolution_half_disk(h_dist_NM = h_dist_NM)
+            
+            # Add H3 index and neighbors
             resampled_w_h3 = self.resampled_sdf.withColumn("h3_index", lat_lon_to_h3_udf(col("latitude"), col("longitude"), lit(resolution)))
             resampled_w_h3 = resampled_w_h3.withColumn("h3_neighbours", get_half_disk_udf(col("h3_index")))
         
