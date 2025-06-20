@@ -10,8 +10,8 @@ from pyspark.sql.functions import (
     sin, cos, sqrt, atan2, lit, monotonically_increasing_id
 )
 from pyspark.sql.types import (
-    StringType, ArrayType )
-from pyspark.sql import Window
+    StringType, ArrayType, TimestampType)
+from pyspark.sql import Window, DataFrame
 from tempo import *
 
 # Data libraries
@@ -77,7 +77,9 @@ class CloseEncounters:
             'flight_level': flight_level_col
         }.items():
             traj_sdf = traj_sdf.withColumnRenamed(old_col, new_col)
-            
+        # Cast time_over to timestamp type
+        traj_sdf = traj_sdf.withColumn("time_over", col("time_over").cast(TimestampType()))
+        
         self.traj_sdf = traj_sdf.select(
             col('flight_id'),
             col('icao24'),
@@ -111,6 +113,28 @@ class CloseEncounters:
             time_over_col = time_over_col,
             flight_level_col = flight_level_col)
 
+    def load_parquet_trajectories(
+        self,
+        parquet_path: str,
+        flight_id_col: str,
+        icao24_col: str,
+        longitude_col: str,
+        latitude_col: str,
+        time_over_col: str,
+        flight_level_col: str
+    ):
+        traj_sdf = self.spark.read.parquet(parquet_path)
+    
+        return self.load_spark_trajectories(
+            traj_sdf=traj_sdf,
+            flight_id_col=flight_id_col,
+            icao24_col=icao24_col,
+            longitude_col=longitude_col,
+            latitude_col=latitude_col,
+            time_over_col=time_over_col,
+            flight_level_col=flight_level_col
+        )
+    
     def _load_sample_trajectories_pdf(self) -> pd.DataFrame:
         """
         Load the sample trajectories dataset bundled with the package.
@@ -185,9 +209,11 @@ class CloseEncounters:
             return self
         
         freq = f"{freq_s} sec"
-
+        traj_sdf = self.traj_sdf.withColumn('flight_level_ft', col('flight_level')*100)
+        traj_sdf = traj_sdf.drop(traj_sdf.flight_level)        
+        
         resampled_sdf = TSDF(
-            self.traj_sdf,
+            traj_sdf,
             ts_col="time_over",
             partition_cols=["flight_id", "icao24"]
         )
@@ -253,7 +279,7 @@ class CloseEncounters:
             "group_start_time", 
             "group_end_time", 
             "interpolation_group_duration_sec",
-            "is_interpolated_flight_level", 
+            "is_interpolated_flight_level_ft", 
             "is_interpolated_latitude", 
             "is_interpolated_longitude")
     
@@ -291,7 +317,7 @@ class CloseEncounters:
             resolution = self._select_resolution_half_disk(h_dist_NM = h_dist_NM)
 
             # Cutoff 
-            resampled_co = self.resampled_sdf.filter(col('flight_level') >= lit(v_cutoff_FL))
+            resampled_co = self.resampled_sdf.filter(col('flight_level_ft') >= lit(v_cutoff_FL)*100)
             
             # Add H3 index and neighbors
             resampled_w_h3 = resampled_co.withColumn("h3_index", lat_lon_to_h3_udf(col("latitude"), col("longitude"), lit(resolution)))
@@ -317,8 +343,8 @@ class CloseEncounters:
             # Explode id_list to individual rows 
             df_exploded = grouped_df.withColumn("segment_id", explode("id_list")).drop("id_list")
             
-            # Add back the flight_level as it will speed up self-joins
-            segment_meta_df = resampled_co.select("segment_id", "flight_level", "flight_id")
+            # Add back the flight_level_ft as it will speed up self-joins
+            segment_meta_df = resampled_co.select("segment_id", "flight_level_ft", "flight_id")
             df_exploded = df_exploded.join(segment_meta_df, on="segment_id", how="left")
         
             # Add index within each h3 group
@@ -331,7 +357,7 @@ class CloseEncounters:
                 .join(
                     df_indexed.alias("df2"),
                     (F.col("df1.time_over") == F.col("df2.time_over")) &
-                    (F.abs(F.col("df1.flight_level") - F.col("df2.flight_level")) < v_dist_FL) &
+                    (F.abs(F.col("df1.flight_level_ft") - F.col("df2.flight_level_ft")) < v_dist_FL*100) &
                     (F.col("df1.h3_neighbour") == F.col("df2.h3_neighbour")) &
                     (F.col("df1.idx") < F.col("df2.idx"))
                 )
@@ -368,7 +394,7 @@ class CloseEncounters:
                 .withColumnRenamed("latitude", "lat1") \
                 .withColumnRenamed("longitude", "lon1") \
                 .withColumnRenamed("time_over", "time1") \
-                .withColumnRenamed("flight_level", 'flight_lvl1') \
+                .withColumnRenamed("flight_level_ft", 'flight_lvl1') \
                 .withColumnRenamed("flight_id", "flight_id1") \
                 .withColumnRenamed("icao24", "icao241") \
                 .select("ID1", "lat1", "lon1", "time1", "flight_lvl1", "flight_id1", "icao241")
@@ -377,7 +403,7 @@ class CloseEncounters:
                 .withColumnRenamed("latitude", "lat2") \
                 .withColumnRenamed("longitude", "lon2") \
                 .withColumnRenamed("time_over", "time2") \
-                .withColumnRenamed("flight_level", 'flight_lvl2') \
+                .withColumnRenamed("flight_level_ft", 'flight_lvl2') \
                 .withColumnRenamed("flight_id", "flight_id2") \
                 .withColumnRenamed("icao24", "icao242") \
                 .select("ID2", "lat2", "lon2", "time2", "flight_lvl2", "flight_id2", "icao242")
@@ -400,7 +426,7 @@ class CloseEncounters:
             # Calculate and filter based on height differense (s)
             # -----------------------------------------------------------------------------
             df_pairs = df_pairs.withColumn('v_dist_FL', F.col("flight_lvl1") - F.col("flight_lvl2"))
-            df_pairs = df_pairs.filter(F.abs(F.col('v_dist_FL')) < lit(v_dist_FL))
+            df_pairs = df_pairs.filter(F.abs(F.col('v_dist_FL')) < lit(v_dist_FL)*100)
             #df_pairs.cache()
             #print(f"Number of pairs after FL filter {df_pairs.count()}")
         
@@ -416,7 +442,7 @@ class CloseEncounters:
         
             df_pairs = df_pairs.withColumn(
                 "h_dist_NM",
-                0.539957 * 2 * earth_radius_km * atan2(
+                0.539957 * 2 * CloseEncounters.earth_radius_km * atan2(
                     sqrt(
                         (sin(col('lat2_rad') - col('lat1_rad')) / 2)**2 +
                         cos(col('lat1_rad')) * cos(col('lat2_rad')) *
