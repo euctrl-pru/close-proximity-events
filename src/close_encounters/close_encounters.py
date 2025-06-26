@@ -18,6 +18,7 @@ from tempo import *
 import h3
 import pandas as pd
 import numpy as np
+from keplergl import KeplerGl
 from datetime import datetime
 
 # File libraries
@@ -26,7 +27,7 @@ import json
 
 # Custom libraries
 from .helpers import *
-
+    
 # -----------------------------------------------------------------------------
 # Close Encounter Calculator Class
 # -----------------------------------------------------------------------------
@@ -37,6 +38,13 @@ class CloseEncounters:
     earth_radius_km = 6378  # Approximate Earth radius in kilometers
 
     def __init__(self, spark):
+        """
+        Initialize the CloseEncounters class.
+        
+        Args:
+            spark (SparkSession): An active Spark session.
+        """
+        
         # Spark
         self.spark = spark
 
@@ -68,6 +76,22 @@ class CloseEncounters:
         time_over_col,
         flight_level_col
     ):
+        """
+        Load flight trajectory data from a Spark DataFrame.
+        
+        Args:
+            traj_sdf (DataFrame): Spark DataFrame containing trajectory data.
+            flight_id_col (str): Column name for flight ID.
+            icao24_col (str): Column name for ICAO24 aircraft ID.
+            longitude_col (str): Column name for longitude.
+            latitude_col (str): Column name for latitude.
+            time_over_col (str): Column name for timestamp.
+            flight_level_col (str): Column name for flight level.
+        
+        Returns:
+            CloseEncounters: Self instance for method chaining.
+        """
+        
         for old_col, new_col in {
             'flight_id': flight_id_col,
             'icao24': icao24_col,
@@ -101,6 +125,21 @@ class CloseEncounters:
         time_over_col,
         flight_level_col
     ):
+        """
+        Load flight trajectory data from a pandas DataFrame.
+        
+        Args:
+            traj_pdf (pd.DataFrame): Pandas DataFrame containing trajectory data.
+            flight_id_col (str): Column name for flight ID.
+            icao24_col (str): Column name for ICAO24 aircraft ID.
+            longitude_col (str): Column name for longitude.
+            latitude_col (str): Column name for latitude.
+            time_over_col (str): Column name for timestamp.
+            flight_level_col (str): Column name for flight level.
+        
+        Returns:
+            CloseEncounters: Self instance for method chaining.
+        """
         traj_pdf = traj_pdf[[flight_id_col, icao24_col, longitude_col, latitude_col, time_over_col, flight_level_col]]
         traj_sdf = self.spark.createDataFrame(traj_pdf)
         
@@ -123,6 +162,21 @@ class CloseEncounters:
         time_over_col: str,
         flight_level_col: str
     ):
+        """
+        Load trajectory data from a Parquet file(path).
+        
+        Args:
+            parquet_path (str): Path to the Parquet file.
+            flight_id_col (str): Column name for flight ID.
+            icao24_col (str): Column name for ICAO24 aircraft ID.
+            longitude_col (str): Column name for longitude.
+            latitude_col (str): Column name for latitude.
+            time_over_col (str): Column name for timestamp.
+            flight_level_col (str): Column name for flight level.
+        
+        Returns:
+            CloseEncounters: Self instance for method chaining.
+        """
         traj_sdf = self.spark.read.parquet(parquet_path)
     
         return self.load_spark_trajectories(
@@ -137,8 +191,8 @@ class CloseEncounters:
     
     def _load_sample_trajectories_pdf(self) -> pd.DataFrame:
         """
-        Load the sample trajectories dataset bundled with the package.
-    
+        Load the bundled sample trajectories as a pandas DataFrame.
+        
         Returns:
             pd.DataFrame: A DataFrame containing sample flight trajectory data.
         """
@@ -148,10 +202,10 @@ class CloseEncounters:
 
     def load_sample_trajectories(self):
         """
-        Load the sample trajectories dataset bundled with the package into the class instance.
-    
+        Load the bundled sample trajectories into the class instance.
+        
         Returns:
-            self
+            CloseEncounters: Self instance for method chaining.
         """
         self.load_pandas_trajectories(
             traj_pdf = self._load_sample_trajectories_pdf(),
@@ -165,6 +219,16 @@ class CloseEncounters:
         return self
 
     def _select_resolution_half_disk(self, h_dist_NM = 5):
+        """
+        Select the highest H3 resolution such that the minimum edge length exceeds the given distance in order to detect all pairs correctly.
+        
+        Args:
+            h_dist_NM (float): Horizontal threshold in nautical miles.
+        
+        Returns:
+            int: Selected H3 resolution.
+        """
+        
         h3_df = self.edge_lengths
         h3_df = h3_df[['res', 'Min Edge Length km (Hex)']]
         h3_df = h3_df.rename({'Min Edge Length km (Hex)':'min_edge_length_km'}, axis = 1)
@@ -174,10 +238,10 @@ class CloseEncounters:
     
     def _load_h3_edgelengths(self) -> pd.DataFrame:
         """
-        Load the H3 edgelengths dataset bundled with the package.
-    
+        Load the bundled H3 edgelength reference table.
+        
         Returns:
-            pd.DataFrame: A DataFrame containing H3 edgelengths data.
+            pd.DataFrame: DataFrame containing H3 resolution and edge lengths.
         """
         data_path = files('close_encounters.data').joinpath('h3_edgelengths.csv')
         with data_path.open("rb") as f:
@@ -185,62 +249,27 @@ class CloseEncounters:
     
     def _load_kepler_config(self) -> dict:
         """
-        Load the the Kepler.gl config template bundled with the package.
-    
+        Load the bundled Kepler.gl configuration template.
+        
         Returns:
-            pd.DataFrame: A dictionary containing the Kepler.gl config template.
+            dict: Dictionary containing Kepler.gl configuration settings.
         """
         data_path = files('close_encounters.resources').joinpath('kepler-config.json')
         with data_path.open("rb") as json_file:
             return json.load(json_file)
-
-    def _estimate_dataframe_size(self, df, sample_fraction=0.05):
-        """
-        Estimate the size of a DataFrame in MB.
-        """
-        if df is None:
-            return 0.0
-    
-        try:
-            # Take a sample of the data
-            sample_df = df.sample(withReplacement=False, fraction=sample_fraction, seed=42)
-    
-            # Calculate the size of the sample
-            sample_size_bytes = sample_df.rdd.map(lambda row: sum(len(str(field)) for field in row)).sum()
-            sample_size_mb = sample_size_bytes / (1024 * 1024)
-    
-            # Estimate the total size
-            total_size_mb = sample_size_mb / sample_fraction
-            return total_size_mb
-        except Exception as e:
-            print(f"Error estimating DataFrame size: {e}")
-            return float('nan')
-    
-    def _log_dataframe_stats(self, df, name="DataFrame"):
-        """
-        Log statistics about a DataFrame including size and partition count.
-        """
-        try:
-            size_mb = self._estimate_dataframe_size(df)
-            partition_count = df.rdd.getNumPartitions()
-            print(f"{name} stats:")
-            print(f"  Estimated size: {size_mb:.2f} MB")
-            print(f"  Partition count: {partition_count}")
-            print(f"  Estimated partition size: {(size_mb/partition_count):.2f} MB per partition")
-        except Exception as e:
-            print(f"Error logging DataFrame stats for {name}: {e}")
-
     
     def resample(self, freq_s=5, t_max=10, p_numb=100):
         """
-        Resample the trajectory data to a fixed frequency and interpolate.
-
+        Resample the trajectory data at a fixed interval and linearly interpolate missing values.
+        
         Args:
             freq_s (int): Resampling frequency in seconds.
-            t_max (int): Maximum time interval when data is missing that should be interpolated.
-            p_numb (int): Number of partitions to use after resampling.
+            t_max (int): Maximum allowed interpolation gap in minutes.
+            p_numb (int): Number of Spark partitions for output DataFrame.
+        
+        Returns:
+            CloseEncounters: Self instance for method chaining.
         """
-
         if (self.resample_freq_s == freq_s) & (self.resample_t_max == t_max):
             print(f'Skipping resample: Already done (w. freq_s = {freq_s} and t_max = {t_max})')
             return self
@@ -335,14 +364,28 @@ class CloseEncounters:
     def find_close_encounters(
         self,
         h_dist_NM = 5, 
-        v_dist_FL = 10, 
+        v_dist_ft = 1000, 
         v_cutoff_FL = 245, 
         freq_s=5, 
         t_max=10, 
         p_numb=100,
         method='half_disk'
     ):
-
+        """
+        Detect spatial and temporal close encounters between aircraft.
+        
+        Args:
+            h_dist_NM (float): Horizontal distance threshold in nautical miles.
+            v_dist_ft (float): Vertical distance threshold in feet.
+            v_cutoff_FL (int): Minimum flight level cutoff to include.
+            freq_s (int): Resampling frequency in seconds.
+            t_max (int): Maximum interpolation gap in minutes.
+            p_numb (int): Number of Spark partitions to use.
+            method (str): Proximity detection method (currently supports 'half_disk').
+        
+        Returns:
+            DataFrame: Spark DataFrame containing detected close encounters.
+        """
         # Check if data is there
         if self.traj_sdf is None:
             raise Exception("No trajectories loaded. Use .load_pandas_trajectories or .load_spark_trajectories before trying to find encounters.")
@@ -354,7 +397,8 @@ class CloseEncounters:
             resolution = self._select_resolution_half_disk(h_dist_NM = h_dist_NM)
 
             # Cutoff 
-            resampled_co = self.resampled_sdf.filter(col('flight_level_ft') >= lit(v_cutoff_FL)*100).cache()
+            resampled_co = self.resampled_sdf.filter(col('flight_level_ft') >= lit(v_cutoff_FL)*100)
+            
             # Add H3 index and neighbors
             resampled_w_h3 = resampled_co.withColumn("h3_index", lat_lon_to_h3_udf(col("latitude"), col("longitude"), lit(resolution)))
             resampled_w_h3 = resampled_w_h3.withColumn("h3_neighbours", get_half_disk_udf(col("h3_index")))
@@ -363,8 +407,6 @@ class CloseEncounters:
             # Explode neighbors and group by time_over and h3_neighbour to collect IDs when there's multiple FLIGHT_ID in a cell
             # -----------------------------------------------------------------------------
             exploded_df = resampled_w_h3.withColumn("h3_neighbour", explode(col("h3_neighbours")))
-            #print(f"Exploded df nrow = {exploded_df.count()}")
-        
             grouped_df = (exploded_df.groupBy(["time_over", "h3_neighbour"])
                         .agg(F.countDistinct("flight_id").alias("flight_count"),
                             F.collect_list("segment_id").alias("id_list"))
@@ -372,7 +414,7 @@ class CloseEncounters:
                         .drop("flight_count"))
         
             grouped_df = grouped_df.filter(F.size("id_list") > 1)
-            #print(f"Grouped df nrow = {grouped_df.count()}")
+
             # -----------------------------------------------------------------------------
             # Create pairwise combinations using self-join on indexed exploded DataFrame
             # -----------------------------------------------------------------------------
@@ -386,15 +428,14 @@ class CloseEncounters:
             # Add index within each h3 group
             window_spec = Window.partitionBy(["time_over","h3_neighbour"]).orderBy("segment_id")
             df_indexed = df_exploded.withColumn("idx", F.row_number().over(window_spec))
-            df_indexed = df_indexed.repartition(p_numb, "time_over", "h3_neighbour")
-
+        
             # Self-join to form unique unordered ID pairs
             df_pairs = (
                 df_indexed.alias("df1")
                 .join(
                     df_indexed.alias("df2"),
                     (F.col("df1.time_over") == F.col("df2.time_over")) &
-                    (F.abs(F.col("df1.flight_level_ft") - F.col("df2.flight_level_ft")) < v_dist_FL*100) &
+                    (F.abs(F.col("df1.flight_level_ft") - F.col("df2.flight_level_ft")) < v_dist_ft) &
                     (F.col("df1.h3_neighbour") == F.col("df2.h3_neighbour")) &
                     (F.col("df1.idx") < F.col("df2.idx"))
                 )
@@ -431,48 +472,41 @@ class CloseEncounters:
                 .withColumnRenamed("latitude", "lat1") \
                 .withColumnRenamed("longitude", "lon1") \
                 .withColumnRenamed("time_over", "time1") \
-                .withColumnRenamed("flight_level_ft", 'flight_lvl1') \
+                .withColumnRenamed("flight_level_ft", 'altitude_ft1') \
                 .withColumnRenamed("flight_id", "flight_id1") \
                 .withColumnRenamed("icao24", "icao241") \
-                .withColumnRenamed("is_ts_interpolated", "is_ts_interpolated1") \
-                .select("ID1", "lat1", "lon1", "time1", "flight_lvl1", "flight_id1", "icao241", "is_ts_interpolated1")
+                .select("ID1", "lat1", "lon1", "time1", "altitude_ft1", "flight_id1", "icao241")
         
             coords_sdf2 = resampled_co.withColumnRenamed("segment_id", "ID2") \
                 .withColumnRenamed("latitude", "lat2") \
                 .withColumnRenamed("longitude", "lon2") \
                 .withColumnRenamed("time_over", "time2") \
-                .withColumnRenamed("flight_level_ft", 'flight_lvl2') \
+                .withColumnRenamed("flight_level_ft", 'altitude_ft2') \
                 .withColumnRenamed("flight_id", "flight_id2") \
                 .withColumnRenamed("icao24", "icao242") \
-                .withColumnRenamed("is_ts_interpolated", "is_ts_interpolated2") \
-                .select("ID2", "lat2", "lon2", "time2", "flight_lvl2", "flight_id2", "icao242", "is_ts_interpolated2")
+                .select("ID2", "lat2", "lon2", "time2", "altitude_ft2", "flight_id2", "icao242")
         
             coords_sdf1 = coords_sdf1.repartition(p_numb, "ID1")
             coords_sdf2 = coords_sdf2.repartition(p_numb, "ID2")
         
             df_pairs = df_pairs.join(coords_sdf1, on="ID1", how="left")
             df_pairs = df_pairs.join(coords_sdf2, on="ID2", how="left")
-            #df_pairs.cache()
-            #print(f"Number of pairs (raw): {df_pairs.count()}")
+
             # -----------------------------------------------------------------------------
             # Calculate and filter based on time differense (s)
             # -----------------------------------------------------------------------------
             df_pairs = df_pairs.withColumn('time_diff_s', F.unix_timestamp(F.col("time1")) - F.unix_timestamp(F.col("time2")))
             df_pairs = df_pairs.filter(F.abs(F.col('time_diff_s')) == 0)
-            #df_pairs.cache()
-            #print(f"Number of pairs after time filter {df_pairs.count()}")
+            
             # -----------------------------------------------------------------------------
             # Calculate and filter based on height differense (s)
             # -----------------------------------------------------------------------------
-            df_pairs = df_pairs.withColumn('v_dist_FL', F.col("flight_lvl1") - F.col("flight_lvl2"))
-            df_pairs = df_pairs.filter(F.abs(F.col('v_dist_FL')) < lit(v_dist_FL)*100)
-            #df_pairs.cache()
-            #print(f"Number of pairs after FL filter {df_pairs.count()}")
+            df_pairs = df_pairs.withColumn('v_dist_ft', F.abs(F.col("altitude_ft1") - F.col("altitude_ft2")))
+            df_pairs = df_pairs.filter(F.col('v_dist_ft') < lit(v_dist_ft))
         
             # -----------------------------------------------------------------------------
             # Calulate and filter based on distance (km)
             # -----------------------------------------------------------------------------
-            #df_pairs.cache()
         
             df_pairs = df_pairs.withColumn("lat1_rad", radians(col("lat1"))) \
                            .withColumn("lat2_rad", radians(col("lat2"))) \
@@ -517,3 +551,173 @@ class CloseEncounters:
             
             self.close_encounter_sdf = df_pairs
             return self.close_encounter_sdf
+            
+    def create_keplergl_map(self, display: bool = False) -> KeplerGl:
+        """
+        Create a Kepler.gl map visualizing detected close encounters.
+    
+        Args:
+            display (bool, optional): If True, display the map inline in a notebook. Defaults to False.
+    
+        Returns:
+            KeplerGl: Kepler.gl map object ready for display or saving.
+    
+        Raises:
+            ValueError: If no encounter data is available.
+        """
+        if self.close_encounter_pdf is None:
+            raise ValueError('No close encounters found. Run find_close_encounters() first.')
+    
+        encounters_df = self.close_encounter_pdf
+        keplergl_config = self._load_kepler_config()
+        data_id = 'Close Encounter Data'
+    
+        # Update config with encounter data ranges
+        keplergl_config['config']['visState']['filters'][0]['value'] = [
+            encounters_df.time_over.min().timestamp() * 1000,
+            encounters_df.time_over.max().timestamp() * 1000
+        ]
+        keplergl_config['config']['visState']['interactionConfig']['tooltip']['fieldsToShow'][data_id][1]['filterProps']['domain'] = encounters_df['flight_id1'].to_list()
+        keplergl_config['config']['visState']['interactionConfig']['tooltip']['fieldsToShow'][data_id][2]['filterProps']['domain'] = encounters_df['flight_id2'].to_list()
+    
+        kepler_map = KeplerGl(data={data_id: encounters_df}, config=keplergl_config)
+    
+        if display:
+            try:
+                kepler_map.show()
+            except Exception:
+                print("Inline map display failed — are you in a compatible notebook environment?")
+    
+        return kepler_map
+
+
+    def save_keplergl_map(self, kepler_map: KeplerGl, filename: str = None) -> None:
+        """
+        Save a Kepler.gl map object to an HTML file.
+    
+        Args:
+            kepler_map (KeplerGl): The Kepler.gl map to save.
+            filename (str, optional): Output file name. Defaults to a timestamped name.
+    
+        Returns:
+            None
+        """
+        if filename is None:
+            filename = f'close_encounters_{datetime.now().strftime("%Y%m%d_%H%M%S")}.html'
+    
+        kepler_map.save_to_html(file_name=filename)
+        print(f'Outputted Kepler.gl map: {filename}')
+        print('Note: To view it, download and open with a browser.')
+
+    def get_close_encounters_pdf(self) -> pd.DataFrame:
+        """
+        Return the close encounter results as a pandas DataFrame.
+    
+        Returns:
+            pd.DataFrame: Close encounter pairs with spatial and temporal data.
+    
+        Raises:
+            ValueError: If results have not been computed yet.
+        """
+        if self.close_encounter_pdf is None:
+            raise ValueError("No close encounter data found. Run find_close_encounters() or set manually.")
+        return self.close_encounter_pdf
+
+    def get_resampled_trajectories_sdf(self) -> DataFrame:
+        """
+        Return the resampled Spark DataFrame of trajectories.
+    
+        Returns:
+            DataFrame: Resampled trajectory data.
+    
+        Raises:
+            ValueError: If resampling has not been performed yet.
+        """
+        if self.resampled_sdf is None:
+            raise ValueError("Resampled trajectories not found. Run resample() first.")
+        return self.resampled_sdf
+
+    def get_raw_trajectories_sdf(self) -> DataFrame:
+        """
+        Return the raw Spark DataFrame of loaded trajectories.
+    
+        Returns:
+            DataFrame: Original input trajectory data.
+    
+        Raises:
+            ValueError: If no trajectory data is loaded.
+        """
+        if self.traj_sdf is None:
+            raise ValueError("No trajectory data loaded. Use load_*_trajectories() methods first.")
+        return self.traj_sdf
+
+    def get_summary(self) -> dict:
+        """
+        Return a dictionary summarizing the current state of the class.
+    
+        Returns:
+            dict: Summary statistics and current configuration.
+        """
+        summary = {
+            "flights_loaded": None,
+            "segments_resampled": None,
+            "close_encounters_found": None,
+            "resample_freq_s": self.resample_freq_s,
+            "resample_t_max": self.resample_t_max
+        }
+    
+        if self.traj_sdf is not None:
+            summary["flights_loaded"] = self.traj_sdf.select("flight_id").distinct().count()
+    
+        if self.resampled_sdf is not None:
+            summary["segments_resampled"] = self.resampled_sdf.count()
+    
+        if self.close_encounter_sdf is not None:
+            summary["close_encounters_found"] = self.close_encounter_sdf.count()
+    
+        return summary
+
+    def set_close_encounter_pdf(self, pdf: pd.DataFrame | str):
+        """
+        Set the close encounter results from a DataFrame or Parquet file.
+    
+        Args:
+            pdf (pd.DataFrame | str): Pandas DataFrame of results or path to a Parquet file.
+    
+        Raises:
+            TypeError: If input is neither a DataFrame nor a string path.
+        """
+        if isinstance(pdf, pd.DataFrame):
+            self.close_encounter_pdf = pdf
+        elif isinstance(pdf, str):
+            self.close_encounter_pdf = pd.read_parquet(pdf)
+        else:
+            raise TypeError("Input must be a pandas DataFrame or a string path to a Parquet file.")
+        return self
+
+    def check_trajectories_loaded(self) -> bool:
+        """
+        Check whether trajectory data has been successfully loaded.
+    
+        Returns:
+            bool: True if loaded, False otherwise.
+        """
+        return self.traj_sdf is not None
+
+    def check_trajectories_resampled(self) -> bool:
+        """
+        Check whether resampling has been performed.
+    
+        Returns:
+            bool: True if resampled trajectories are available, False otherwise.
+        """
+        return self.resampled_sdf is not None
+
+
+
+
+
+    
+
+
+

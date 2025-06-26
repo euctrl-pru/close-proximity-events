@@ -20,8 +20,7 @@ def select_resolution(delta_x_nm, h3_df = h3_df):
 def select_resolution_half_disk(delta_x_nm, h3_df = h3_df):
     h3_df_ = h3_df[h3_df.min_edge_length_km > delta_x_nm]
     return int(max(h3_df_.res.to_list()))
-
-
+    
 # -----------------------------------------------------------------------------
 # Define UDFs for H3
 # -----------------------------------------------------------------------------
