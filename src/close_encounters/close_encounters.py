@@ -27,7 +27,20 @@ import json
 
 # Custom libraries
 from .helpers import *
-    
+
+# Logging 
+import logging
+
+# Configure logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Or logging.DEBUG for more verbosity
+
+if not logger.hasHandlers():
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
 # -----------------------------------------------------------------------------
 # Close Encounter Calculator Class
 # -----------------------------------------------------------------------------
@@ -44,6 +57,7 @@ class CloseEncounters:
         Args:
             spark (SparkSession): An active Spark session.
         """
+        logger.info("Initialized CloseEncounters class.")
         
         # Spark
         self.spark = spark
@@ -112,7 +126,8 @@ class CloseEncounters:
             col('time_over'),
             col('flight_level')
         )
-    
+
+        logger.info("Loaded trajectory data from Spark DataFrame.")
         return self
 
     def load_pandas_trajectories(
@@ -143,6 +158,7 @@ class CloseEncounters:
         traj_pdf = traj_pdf[[flight_id_col, icao24_col, longitude_col, latitude_col, time_over_col, flight_level_col]]
         traj_sdf = self.spark.createDataFrame(traj_pdf)
         
+        logger.info("Loaded trajectory data from pandas DataFrame.")
         return self.load_spark_trajectories(
             traj_sdf = traj_sdf,
             flight_id_col = flight_id_col,
@@ -178,7 +194,8 @@ class CloseEncounters:
             CloseEncounters: Self instance for method chaining.
         """
         traj_sdf = self.spark.read.parquet(parquet_path)
-    
+
+        logger.info(f"Loaded trajectory data from parquet: {parquet_path}")
         return self.load_spark_trajectories(
             traj_sdf=traj_sdf,
             flight_id_col=flight_id_col,
@@ -198,6 +215,7 @@ class CloseEncounters:
         """
         data_path = files("close_encounters.data").joinpath("sample_trajectories.parquet")
         with data_path.open("rb") as f:
+            logger.info("Loaded bundled sample trajectories.")
             return pd.read_parquet(f)
 
     def load_sample_trajectories(self):
@@ -271,7 +289,7 @@ class CloseEncounters:
             CloseEncounters: Self instance for method chaining.
         """
         if (self.resample_freq_s == freq_s) & (self.resample_t_max == t_max):
-            print(f'Skipping resample: Already done (w. freq_s = {freq_s} and t_max = {t_max})')
+            logger.info(f"Skipping resample: already done (freq_s={freq_s}, t_max={t_max})")
             return self
         
         freq = f"{freq_s} sec"
@@ -355,6 +373,8 @@ class CloseEncounters:
         resampled_sdf.cache() # Keep, this is needed to persist the IDs and speed up further calculations
         resampled_sdf.count()
 
+        logger.info("Resampling complete. Total segments: %d", self.resampled_sdf.count())
+
         # Housekeeping
         self.resampled_sdf = resampled_sdf
         self.resample_freq_s = freq_s 
@@ -386,6 +406,8 @@ class CloseEncounters:
         Returns:
             DataFrame: Spark DataFrame containing detected close encounters.
         """
+        logger.info("Starting close encounter detection with method='%s'", method)
+        
         # Check if data is there
         if self.traj_sdf is None:
             raise Exception("No trajectories loaded. Use .load_pandas_trajectories or .load_spark_trajectories before trying to find encounters.")
@@ -548,6 +570,7 @@ class CloseEncounters:
             )
 
             df_pairs.cache()
+            logger.info("Found %d candidate close encounters", df_pairs.count())
             
             self.close_encounter_sdf = df_pairs
             return self.close_encounter_sdf
@@ -566,7 +589,7 @@ class CloseEncounters:
             ValueError: If no encounter data is available.
         """
         if self.close_encounter_pdf is None:
-            raise ValueError('No close encounters found. Run find_close_encounters() first.')
+            raise ValueError(logger.error("Kepler map creation failed: no encounter data found."))
     
         encounters_df = self.close_encounter_pdf
         keplergl_config = self._load_kepler_config()
@@ -606,8 +629,8 @@ class CloseEncounters:
             filename = f'close_encounters_{datetime.now().strftime("%Y%m%d_%H%M%S")}.html'
     
         kepler_map.save_to_html(file_name=filename)
-        print(f'Outputted Kepler.gl map: {filename}')
-        print('Note: To view it, download and open with a browser.')
+        
+        logger.info(f"Kepler map saved to: {filename}. Note: To view it, (download and) open with a browser.")
 
     def get_close_encounters_pdf(self) -> pd.DataFrame:
         """
@@ -674,7 +697,8 @@ class CloseEncounters:
     
         if self.close_encounter_sdf is not None:
             summary["close_encounters_found"] = self.close_encounter_sdf.count()
-    
+        
+        logger.info("Generated analysis summary: %s", summary)
         return summary
 
     def set_close_encounter_pdf(self, pdf: pd.DataFrame | str):
@@ -691,6 +715,7 @@ class CloseEncounters:
             self.close_encounter_pdf = pdf
         elif isinstance(pdf, str):
             self.close_encounter_pdf = pd.read_parquet(pdf)
+            logger.info("Set close encounter results from %s", "DataFrame" if isinstance(pdf, pd.DataFrame) else pdf)
         else:
             raise TypeError("Input must be a pandas DataFrame or a string path to a Parquet file.")
         return self
