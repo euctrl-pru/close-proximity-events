@@ -193,6 +193,43 @@ class CloseEncounters:
         data_path = files('close_encounters.resources').joinpath('kepler-config.json')
         with data_path.open("rb") as json_file:
             return json.load(json_file)
+
+    def _estimate_dataframe_size(self, df, sample_fraction=0.05):
+        """
+        Estimate the size of a DataFrame in MB.
+        """
+        if df is None:
+            return 0.0
+    
+        try:
+            # Take a sample of the data
+            sample_df = df.sample(withReplacement=False, fraction=sample_fraction, seed=42)
+    
+            # Calculate the size of the sample
+            sample_size_bytes = sample_df.rdd.map(lambda row: sum(len(str(field)) for field in row)).sum()
+            sample_size_mb = sample_size_bytes / (1024 * 1024)
+    
+            # Estimate the total size
+            total_size_mb = sample_size_mb / sample_fraction
+            return total_size_mb
+        except Exception as e:
+            print(f"Error estimating DataFrame size: {e}")
+            return float('nan')
+    
+    def _log_dataframe_stats(self, df, name="DataFrame"):
+        """
+        Log statistics about a DataFrame including size and partition count.
+        """
+        try:
+            size_mb = self._estimate_dataframe_size(df)
+            partition_count = df.rdd.getNumPartitions()
+            print(f"{name} stats:")
+            print(f"  Estimated size: {size_mb:.2f} MB")
+            print(f"  Partition count: {partition_count}")
+            print(f"  Estimated partition size: {(size_mb/partition_count):.2f} MB per partition")
+        except Exception as e:
+            print(f"Error logging DataFrame stats for {name}: {e}")
+
     
     def resample(self, freq_s=5, t_max=10, p_numb=100):
         """
@@ -317,8 +354,7 @@ class CloseEncounters:
             resolution = self._select_resolution_half_disk(h_dist_NM = h_dist_NM)
 
             # Cutoff 
-            resampled_co = self.resampled_sdf.filter(col('flight_level_ft') >= lit(v_cutoff_FL)*100)
-            
+            resampled_co = self.resampled_sdf.filter(col('flight_level_ft') >= lit(v_cutoff_FL)*100).cache()
             # Add H3 index and neighbors
             resampled_w_h3 = resampled_co.withColumn("h3_index", lat_lon_to_h3_udf(col("latitude"), col("longitude"), lit(resolution)))
             resampled_w_h3 = resampled_w_h3.withColumn("h3_neighbours", get_half_disk_udf(col("h3_index")))
@@ -350,7 +386,8 @@ class CloseEncounters:
             # Add index within each h3 group
             window_spec = Window.partitionBy(["time_over","h3_neighbour"]).orderBy("segment_id")
             df_indexed = df_exploded.withColumn("idx", F.row_number().over(window_spec))
-        
+            df_indexed = df_indexed.repartition(p_numb, "time_over", "h3_neighbour")
+
             # Self-join to form unique unordered ID pairs
             df_pairs = (
                 df_indexed.alias("df1")
@@ -397,7 +434,8 @@ class CloseEncounters:
                 .withColumnRenamed("flight_level_ft", 'flight_lvl1') \
                 .withColumnRenamed("flight_id", "flight_id1") \
                 .withColumnRenamed("icao24", "icao241") \
-                .select("ID1", "lat1", "lon1", "time1", "flight_lvl1", "flight_id1", "icao241")
+                .withColumnRenamed("is_ts_interpolated", "is_ts_interpolated1") \
+                .select("ID1", "lat1", "lon1", "time1", "flight_lvl1", "flight_id1", "icao241", "is_ts_interpolated1")
         
             coords_sdf2 = resampled_co.withColumnRenamed("segment_id", "ID2") \
                 .withColumnRenamed("latitude", "lat2") \
@@ -406,7 +444,8 @@ class CloseEncounters:
                 .withColumnRenamed("flight_level_ft", 'flight_lvl2') \
                 .withColumnRenamed("flight_id", "flight_id2") \
                 .withColumnRenamed("icao24", "icao242") \
-                .select("ID2", "lat2", "lon2", "time2", "flight_lvl2", "flight_id2", "icao242")
+                .withColumnRenamed("is_ts_interpolated", "is_ts_interpolated2") \
+                .select("ID2", "lat2", "lon2", "time2", "flight_lvl2", "flight_id2", "icao242", "is_ts_interpolated2")
         
             coords_sdf1 = coords_sdf1.repartition(p_numb, "ID1")
             coords_sdf2 = coords_sdf2.repartition(p_numb, "ID2")
