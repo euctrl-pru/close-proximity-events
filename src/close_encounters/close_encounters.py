@@ -373,12 +373,12 @@ class CloseEncounters:
         resampled_sdf.cache() # Keep, this is needed to persist the IDs and speed up further calculations
         resampled_sdf.count()
 
-        logger.info("Resampling complete. Total segments: %d", self.resampled_sdf.count())
-
         # Housekeeping
         self.resampled_sdf = resampled_sdf
         self.resample_freq_s = freq_s 
         self.resample_t_max = t_max
+
+        logger.info("Resampling complete. Total segments: %d", self.resampled_sdf.count())
         return self
 
     def find_close_encounters(
