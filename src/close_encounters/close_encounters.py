@@ -20,6 +20,9 @@ import pandas as pd
 import numpy as np
 from keplergl import KeplerGl
 from datetime import datetime
+import duckdb
+import tempfile
+import os
 
 # File libraries
 from importlib.resources import files
@@ -206,7 +209,7 @@ class CloseEncounters:
             flight_level_col=flight_level_col
         )
     
-    def _load_sample_trajectories_pdf(self) -> pd.DataFrame:
+    def _load_sample_trajectories_pdf(self, nrows = None) -> pd.DataFrame:
         """
         Load the bundled sample trajectories as a pandas DataFrame.
         
@@ -216,9 +219,12 @@ class CloseEncounters:
         data_path = files("close_encounters.data").joinpath("sample_trajectories.parquet")
         with data_path.open("rb") as f:
             logger.info("Loaded bundled sample trajectories.")
-            return pd.read_parquet(f)
+            if nrows is None:
+                return pd.read_parquet(f)
+            else:
+                return pd.read_parquet(f).iloc[:nrows]
 
-    def load_sample_trajectories(self):
+    def load_sample_trajectories(self, nrows = None):
         """
         Load the bundled sample trajectories into the class instance.
         
@@ -226,7 +232,7 @@ class CloseEncounters:
             CloseEncounters: Self instance for method chaining.
         """
         self.load_pandas_trajectories(
-            traj_pdf = self._load_sample_trajectories_pdf(),
+            traj_pdf = self._load_sample_trajectories_pdf(nrows = nrows),
             flight_id_col = 'FLIGHT_ID',
             icao24_col = 'ICAO24',
             longitude_col = 'LONGITUDE',
@@ -457,7 +463,7 @@ class CloseEncounters:
                 .join(
                     df_indexed.alias("df2"),
                     (F.col("df1.time_over") == F.col("df2.time_over")) &
-                    (F.abs(F.col("df1.flight_level_ft") - F.col("df2.flight_level_ft")) < v_dist_ft) &
+                    (F.abs(F.col("df1.flight_level_ft") - F.col("df2.flight_level_ft")) <= v_dist_ft) &
                     (F.col("df1.h3_neighbour") == F.col("df2.h3_neighbour")) &
                     (F.col("df1.idx") < F.col("df2.idx"))
                 )
@@ -514,6 +520,11 @@ class CloseEncounters:
             df_pairs = df_pairs.join(coords_sdf1, on="ID1", how="left")
             df_pairs = df_pairs.join(coords_sdf2, on="ID2", how="left")
 
+            # Round altitude to 0.01 ft precision
+            df_pairs = df_pairs\
+                .withColumn("altitude_ft1", F.round(col("altitude_ft1"), 2)) \
+                .withColumn("altitude_ft2", F.round(col("altitude_ft2"), 2))
+
             # -----------------------------------------------------------------------------
             # Calculate and filter based on time differense (s)
             # -----------------------------------------------------------------------------
@@ -524,7 +535,7 @@ class CloseEncounters:
             # Calculate and filter based on height differense (s)
             # -----------------------------------------------------------------------------
             df_pairs = df_pairs.withColumn('v_dist_ft', F.abs(F.col("altitude_ft1") - F.col("altitude_ft2")))
-            df_pairs = df_pairs.filter(F.col('v_dist_ft') < lit(v_dist_ft))
+            df_pairs = df_pairs.filter(F.col('v_dist_ft') <= lit(v_dist_ft))
         
             # -----------------------------------------------------------------------------
             # Calulate and filter based on distance (km)
@@ -556,7 +567,7 @@ class CloseEncounters:
             df_pairs = df_pairs.filter(col('h_dist_NM') <= lit(h_dist_NM))
         
             # -----------------------------------------------------------------------------
-            # Fetch sample
+            # Enrich sample
             # -----------------------------------------------------------------------------
 
             df_pairs = df_pairs.withColumn(
@@ -569,11 +580,228 @@ class CloseEncounters:
                 F.concat(F.lit('ID_'), F.round(F.col('flight_id2')).cast('int').cast('string'))
             )
 
+            df_pairs = df_pairs.withColumn(
+                "ce_id",
+                F.concat_ws(
+                    "_",
+                    F.sort_array(
+                        F.array(F.col("flight_id1"), F.col("flight_id2"))
+                    )
+                )
+            )
+
+            full_window = (
+                Window
+                .partitionBy("ce_id")
+                .orderBy(F.col("time_over"))
+                .rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
+            )
+
+            df_pairs = (
+                df_pairs
+                # start_v_dist_ft = v_dist_ft at minimum time_over
+                .withColumn(
+                    "start_v_dist_ft",
+                    F.first(F.col("v_dist_ft")).over(full_window)
+                )
+                # end_v_dist_ft = v_dist_ft at maximum time_over
+                .withColumn(
+                    "end_v_dist_ft",
+                    F.last(F.col("v_dist_ft")).over(full_window)
+                )
+                # start_h_dist_NM = h_dist_NM at minimum time_over
+                .withColumn(
+                    "start_h_dist_NM",
+                    F.first(F.col("h_dist_NM")).over(full_window)
+                )
+                # end_h_dist_NM = h_dist_NM at maximum time_over
+                .withColumn(
+                    "end_h_dist_NM",
+                    F.last(F.col("h_dist_NM")).over(full_window)
+                )
+            )
+
             df_pairs.cache()
             logger.info("Found %d candidate close encounters", df_pairs.count())
             
             self.close_encounter_sdf = df_pairs
             return self.close_encounter_sdf
+        
+        if method == 'brute_force':
+            # -----------------------------------------------------------------------------
+            # Create pairwise combinations using self-join on indexed exploded DataFrame
+            # -----------------------------------------------------------------------------
+            # Explode id_list to individual rows and add index within each h3 group
+            resampled_co = self.resampled_sdf.filter(col('flight_level_ft') >= lit(v_cutoff_FL)*100)
+
+            coords_df_f = resampled_co.select(['segment_id','time_over'])
+            window_spec = Window.partitionBy("time_over").orderBy("segment_id")
+            df_indexed = coords_df_f.withColumn("idx", F.row_number().over(window_spec))
+
+            # Self-join to form unique unordered ID pairs
+            df_pairs = (
+                df_indexed.alias("df1")
+                .join(
+                    df_indexed.alias("df2"),
+                    (F.col("df1.time_over") == F.col("df2.time_over")) &
+                    (F.col("df1.idx") < F.col("df2.idx"))
+                )
+                .select(
+                    F.col("df1.segment_id").alias("ID1"),
+                    F.col("df2.segment_id").alias("ID2")
+                )
+            )
+            #df_pairs.cache()
+            #print(f"Number of generated pairs: {df_pairs.count()}")
+            # -----------------------------------------------------------------------------
+            # Clean Pairs, Create Unique Pair ID
+            # -----------------------------------------------------------------------------
+            df_pairs = df_pairs.filter(col("ID1") != col("ID2")) # should not be necessary as we join on < not <=
+            df_pairs = df_pairs.withColumn(
+                "ID",
+                F.concat_ws("_", F.array_sort(F.array(col("ID1"), col("ID2"))))
+            )
+
+            # -----------------------------------------------------------------------------
+            # Join with Original Coordinates for Each ID
+            # -----------------------------------------------------------------------------
+            coords_sdf1 = resampled_co.withColumnRenamed("segment_id", "ID1") \
+                .withColumnRenamed("latitude", "lat1") \
+                .withColumnRenamed("longitude", "lon1") \
+                .withColumnRenamed("time_over", "time1") \
+                .withColumnRenamed("flight_level_ft", 'altitude_ft1') \
+                .withColumnRenamed("flight_id", "flight_id1") \
+                .select("ID1", "lat1", "lon1", "time1", "altitude_ft1", "flight_id1")
+
+            coords_sdf2 = resampled_co.withColumnRenamed("segment_id", "ID2") \
+                .withColumnRenamed("latitude", "lat2") \
+                .withColumnRenamed("longitude", "lon2") \
+                .withColumnRenamed("time_over", "time2") \
+                .withColumnRenamed("flight_level_ft", 'altitude_ft2') \
+                .withColumnRenamed("flight_id", "flight_id2") \
+                .select("ID2", "lat2", "lon2", "time2", "altitude_ft2", "flight_id2")
+
+            coords_sdf1 = coords_sdf1.repartition(100, "ID1")
+            coords_sdf2 = coords_sdf2.repartition(100, "ID2")
+
+            df_pairs = df_pairs.join(coords_sdf1, on="ID1", how="left")
+            df_pairs = df_pairs.join(coords_sdf2, on="ID2", how="left")
+            #df_pairs.cache()
+            #print(f"Number of pairs (raw): {df_pairs.count()}")
+            # -----------------------------------------------------------------------------
+            # Calculate and filter based on time differense (s)
+            # -----------------------------------------------------------------------------
+            df_pairs = df_pairs.withColumn('time_diff_s', F.unix_timestamp(F.col("time1")) - F.unix_timestamp(F.col("time2")))
+            df_pairs = df_pairs.filter(F.abs(F.col('time_diff_s')) == 0)
+            #df_pairs.cache()
+            #print(f"Number of pairs after time filter {df_pairs.count()}")
+            # -----------------------------------------------------------------------------
+            # Calculate and filter based on height differense (s)
+            # -----------------------------------------------------------------------------
+            df_pairs = df_pairs.withColumn('v_dist_ft', F.col("altitude_ft1") - F.col("altitude_ft2"))
+            df_pairs = df_pairs.filter(F.abs(F.col('v_dist_ft')) <= lit(v_dist_ft))
+            #df_pairs.cache()
+            #print(f"Number of pairs after FL filter {df_pairs.count()}")
+
+            # -----------------------------------------------------------------------------
+            # Calulate and filter based on distance (km)
+            # -----------------------------------------------------------------------------
+            df_pairs = df_pairs.withColumn(
+                "h_dist_NM",
+                0.539957 * 2 * CloseEncounters.earth_radius_km * atan2(
+                    sqrt(
+                        (sin(radians(col("lat2")) - radians(col("lat1"))) / 2)**2 +
+                        cos(radians(col("lat1"))) * cos(radians(col("lat2"))) *
+                        (sin(radians(col("lon2")) - radians(col("lon1"))) / 2)**2
+                    ),
+                    sqrt(1 - (
+                        (sin(radians(col("lat2")) - radians(col("lat1"))) / 2)**2 +
+                        cos(radians(col("lat1"))) * cos(radians(col("lat2"))) *
+                        (sin(radians(col("lon2")) - radians(col("lon1"))) / 2)**2
+                    ))
+                )
+            )
+
+            df_pairs = df_pairs.filter(col('h_dist_NM') <= lit(h_dist_NM))
+
+            # # -----------------------------------------------------------------------------
+            # # Enrich sample
+            # # -----------------------------------------------------------------------------
+
+            df_pairs = df_pairs.withColumn(
+                "ce_id",
+                F.concat_ws(
+                    "_",
+                    F.sort_array(
+                        F.array(F.col("flight_id1"), F.col("flight_id2"))
+                    )
+                )
+            )
+
+            full_window = (
+                Window
+                .partitionBy("ce_id")
+                .orderBy(F.col("time_over"))
+                .rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
+            )
+
+            df_pairs = (
+                df_pairs
+                # start_time_over = time_over at minimum time_over
+                .withColumn(
+                    "start_time",
+                    F.first(F.col("time_over")).over(full_window)
+                )
+                # end_time_over = time_over at minimum time_over
+                .withColumn(
+                    "end_time",
+                    F.first(F.col("time_over")).over(full_window)
+                )
+                # start_v_dist_ft = v_dist_ft at minimum time_over
+                .withColumn(
+                    "start_v_dist_ft",
+                    F.first(F.col("v_dist_ft")).over(full_window)
+                )
+                # end_v_dist_ft = v_dist_ft at maximum time_over
+                .withColumn(
+                    "end_v_dist_ft",
+                    F.last(F.col("v_dist_ft")).over(full_window)
+                )
+                # start_h_dist_NM = h_dist_NM at minimum time_over
+                .withColumn(
+                    "start_h_dist_NM",
+                    F.first(F.col("h_dist_NM")).over(full_window)
+                )
+                # end_h_dist_NM = h_dist_NM at maximum time_over
+                .withColumn(
+                    "end_h_dist_NM",
+                    F.last(F.col("h_dist_NM")).over(full_window)
+                )
+                # min_v_dist_ft = min(v_dist_ft) at any time_over
+                .withColumn(
+                    "min_v_dist_ft",
+                    F.min(F.col("v_dist_ft")).over(full_window)
+                )
+                # max_v_dist_ft = max(v_dist_ft) at any time_over
+                .withColumn(
+                    "max_v_dist_ft",
+                    F.max(F.col("v_dist_ft")).over(full_window)
+                )
+                # min_h_dist_NM = min(h_dist_NM) at any time_over
+                .withColumn(
+                    "min_h_dist_NM",
+                    F.min(F.col("h_dist_NM")).over(full_window)
+                )
+                # max_v_dist_ft = max(v_dist_ft) at any time_over
+                .withColumn(
+                    "max_h_dist_NM",
+                    F.max(F.col("h_dist_NM")).over(full_window)
+                )
+            )
+
+            df = df_pairs.toPandas()
+            print(f"Number of unique BF ID pairs: {df.shape[0]}")
+            return df
             
     def create_keplergl_map(self, display: bool = False) -> KeplerGl:
         """
@@ -737,12 +965,201 @@ class CloseEncounters:
             bool: True if resampled trajectories are available, False otherwise.
         """
         return self.resampled_sdf is not None
-
-
-
-
-
     
 
 
 
+    def filter_down_ce(self) -> pd.DataFrame:
+        """
+        Apply filtering rules to encounters
+        """
+
+        # Rule R1: Exclude encounters for which 
+        #       flight_id1 == flight_id2
+        #                  OR
+        #       icao241 == icao242
+        close_encounter_sdf = self.close_encounter_sdf
+        close_encounter_sdf =  close_encounter_sdf\
+            .filter(col('flight_id1')!=col('flight_id2'))\
+            .filter(col('icao241')!=col('icao242'))
+        
+        # Rule R2: Unclear
+        
+        # Rule R3
+        # For each pair, check duration <10 sec and increasing horizontal/vertical separation after the minimum 
+
+        close_encounter_sdf = close_encounter_sdf.filter(
+            ~(
+                (F.col('start_v_dist_ft') <= F.col('end_v_dist_ft')) &
+                (F.col('start_h_dist_NM') <= F.col('end_h_dist_NM')) &
+                (
+                    F.abs(
+                        F.unix_timestamp('end_time')
+                        - F.unix_timestamp('start_time')
+                    ) <= 10
+                )
+            )
+        )
+
+    def find_close_encounters_duckdb(
+        self,
+        h_dist_NM=5,
+        v_dist_ft=1000,
+        v_cutoff_FL=245,
+        freq_s=5,
+        t_max=10,
+        p_numb=100
+         ):
+            """
+            DuckDB-based detection that exactly reproduces the Spark half-disk logic,
+            including the explicit group/collect_list/filter stage.
+            """
+            if self.traj_sdf is None:
+                raise ValueError("No trajectories loaded.")
+            logger.info("Starting DuckDB-based detection (1:1 with Spark).")
+
+            # 1) resample + altitude cutoff
+            self.resample(freq_s=freq_s, t_max=t_max, p_numb=p_numb)
+            resolution = self._select_resolution_half_disk(h_dist_NM=h_dist_NM)
+
+            base_sdf = (
+                self.resampled_sdf
+                    .filter(F.col("flight_level_ft") >= v_cutoff_FL * 100)
+                    .select("segment_id","flight_id","icao24","latitude","longitude","time_over","flight_level_ft")
+            )
+
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "sample.parquet")
+                base_sdf.write.mode("overwrite").parquet(path)
+
+                con = duckdb.connect()
+                con.execute("INSTALL h3 FROM community; LOAD h3;")
+                con.execute("PRAGMA max_temp_directory_size='500GiB';")
+                con.execute("SET preserve_insertion_order = false;")
+                con.execute("SET threads = 4;")
+
+                # A) load & compute h3 index
+                con.execute(f"""
+                CREATE TABLE resampled AS
+                SELECT
+                *,
+                h3_latlng_to_cell_string(latitude, longitude, {resolution}) AS h3_index
+                FROM parquet_scan('{path}/*.parquet');
+                """)
+
+                # B) explode into neighbors
+                con.execute("""
+                CREATE TABLE exploded AS
+                SELECT
+                *,
+                unnest(array_concat([h3_index], h3_grid_ring(h3_index, 1))) AS h3_neighbour
+                FROM resampled;
+                """)
+
+                # C) now do the exact Spark group/collect_list/filter
+                con.execute("""
+                CREATE TABLE grouped AS
+                SELECT
+                time_over,
+                h3_neighbour,
+                COUNT(DISTINCT flight_id) AS flight_count,
+                LIST(segment_id)         AS id_list
+                FROM exploded
+                GROUP BY time_over, h3_neighbour
+                HAVING flight_count > 1;
+                """)
+
+                # D) explode that list back out to get one row per segment:
+                con.execute("""
+                CREATE TABLE exploded2 AS
+                SELECT
+                time_over,
+                h3_neighbour,
+                unnest(id_list) AS segment_id
+                FROM grouped;
+                """)
+
+                # E) re-join the metadata (still only the filtered segments)
+                con.execute("""
+                CREATE TABLE enriched AS
+                SELECT
+                e2.*,
+                r.flight_level_ft
+                FROM exploded2 e2
+                JOIN resampled r
+                ON e2.segment_id = r.segment_id
+                AND e2.time_over   = r.time_over;
+                """)
+
+                # F) index them per (time,h3) for the self-join
+                con.execute("""
+                CREATE TABLE indexed AS
+                SELECT
+                *,
+                row_number() OVER (
+                    PARTITION BY time_over, h3_neighbour
+                    ORDER BY segment_id
+                ) AS idx
+                FROM enriched;
+                """)
+
+                # G) self-join exactly as Spark does (including vertical filter in join)
+                con.execute(f"""
+                CREATE TABLE pairs AS
+                SELECT DISTINCT
+                a.time_over,
+                a.segment_id   AS ID1,
+                b.segment_id   AS ID2
+                FROM indexed a
+                JOIN indexed b
+                ON a.time_over     = b.time_over
+                AND a.h3_neighbour = b.h3_neighbour
+                AND a.idx < b.idx
+                AND ABS(ROUND(a.flight_level_ft, 2) - ROUND(b.flight_level_ft, 2)) <= {v_dist_ft};
+                """)        
+
+                # H) stitch back coordinates for each side (again only from the filtered set)
+                con.execute("""
+                CREATE TABLE joined AS
+                SELECT
+                p.*,
+                r1.latitude        AS lat1,
+                r1.longitude       AS lon1,
+                ROUND(r1.flight_level_ft,2) AS altitude_ft1,
+                r1.flight_id       AS flight_id1,
+                r2.latitude        AS lat2,
+                r2.longitude       AS lon2,
+                ROUND(r2.flight_level_ft, 2) AS altitude_ft2,
+                r2.flight_id       AS flight_id2
+                FROM pairs p
+                JOIN resampled r1
+                ON p.ID1 = r1.segment_id
+                AND p.time_over = r1.time_over
+                JOIN resampled r2
+                ON p.ID2 = r2.segment_id
+                AND p.time_over = r2.time_over;
+                """)
+
+                # I) final horizontal-distance filter
+                con.execute(f"""
+                SELECT *,
+                0.539957 * 2 * {self.earth_radius_km} * atan2(
+                    sqrt(
+                    pow(sin(radians(lat2-lat1)/2),2) +
+                    cos(radians(lat1))*cos(radians(lat2)) *
+                    pow(sin(radians(lon2-lon1)/2),2)
+                    ),
+                    sqrt(1 - (
+                    pow(sin(radians(lat2-lat1)/2),2) +
+                    cos(radians(lat1))*cos(radians(lat2)) *
+                    pow(sin(radians(lon2-lon1)/2),2)
+                    ))
+                ) AS h_dist_NM
+                FROM joined
+                WHERE h_dist_NM <= {h_dist_NM};
+                """)
+
+                df = con.df()
+                logger.info("DuckDB (1:1 Spark) found %d encounters", len(df))
+                self.close_encounter_pdf = df
+                return df
