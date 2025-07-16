@@ -118,9 +118,10 @@ class CloseEncounters:
             'flight_level': flight_level_col
         }.items():
             traj_sdf = traj_sdf.withColumnRenamed(old_col, new_col)
-        # Cast time_over to timestamp type
-        traj_sdf = traj_sdf.withColumn("time_over", F.col("time_over").cast(TimestampType()))
         
+        # Cast time_over to timestamp type
+        traj_sdf = traj_sdf.withColumn("time_over", F.to_utc_timestamp(F.col("time_over"), "UTC"))
+
         self.traj_sdf = traj_sdf.select(
             F.col('flight_id'),
             F.col('icao24'),
@@ -404,7 +405,8 @@ class CloseEncounters:
         freq_s=5, 
         t_max=10, 
         p_numb=100,
-        method='half_disk'
+        method='half_disk',
+        output = 'self'
     ):
         """
         Detect spatial and temporal close encounters between aircraft.
@@ -417,6 +419,7 @@ class CloseEncounters:
             t_max (int): Maximum interpolation gap in minutes.
             p_numb (int): Number of Spark partitions to use.
             method (str): Proximity detection method (currently supports 'half_disk').
+            output (str): What should be outputted: 'self' (the object itself) / 'pdf' (pandas ce df) / 'sdf' (spark ce df) 
         
         Returns:
             DataFrame: Spark DataFrame containing detected close encounters.
@@ -599,140 +602,108 @@ class CloseEncounters:
                 )
             )
 
-            full_window = (
-                Window
-                .partitionBy("ce_id")
-                .orderBy(F.col("time_over"))
-                .rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
-            )
-            # Define ordering-based windows
-            min_3D_window = Window.partitionBy("ce_id").orderBy("3D_dist_NM", "time_over")
-            max_3D_window = Window.partitionBy("ce_id").orderBy(F.col("3D_dist_NM").desc(), "time_over")
-
-            min_v_window = Window.partitionBy("ce_id").orderBy("v_dist_ft", "time_over")
-            max_v_window = Window.partitionBy("ce_id").orderBy(F.col("v_dist_ft").desc(), "time_over")
-
-            min_h_window = Window.partitionBy("ce_id").orderBy("h_dist_NM", "time_over")
-            max_h_window = Window.partitionBy("ce_id").orderBy(F.col("h_dist_NM").desc(), "time_over")
-
+            ## Goal: Enrich dataset for Taxonomy
+            # Step 0: Cache previous calculations
+            df_pairs = df_pairs.cache()
+            
+            # Step 1: Compute and round distances
             df_pairs = (
                 df_pairs
-                # Calculate 3D distance in NM
-                # Round to avoid floating point precision inequalities... 
-                .withColumn(
-                    "3D_dist_NM",
-                    F.round(
-                        sqrt((F.col("v_dist_ft") / 6076.12) ** 2 + F.col("h_dist_NM") ** 2),
-                        6
-                    )
+                .withColumn("3D_dist_NM", F.round(F.sqrt((F.col("v_dist_ft") / 6076.12) ** 2 + F.col("h_dist_NM") ** 2), 6))
+                .withColumn("v_dist_ft", F.round(F.col("v_dist_ft"), 6))
+                .withColumn("h_dist_NM", F.round(F.col("h_dist_NM"), 6))
+            )
+            
+            # Step 2: Create structs to capture values at extrema and boundary times
+            df_pairs = df_pairs.withColumns({
+                # Start of trajectory (min time_over)
+                "start_3D_struct": F.struct(F.col("time_over").alias("time_over"), F.col("3D_dist_NM").alias("3D_dist_NM")),
+                "start_v_struct": F.struct(F.col("time_over").alias("time_over"), F.col("v_dist_ft").alias("v_dist_ft")),
+                "start_h_struct": F.struct(F.col("time_over").alias("time_over"), F.col("h_dist_NM").alias("h_dist_NM")),
+            
+                # End of trajectory (max time_over)
+                "end_3D_struct": F.struct(F.col("time_over").alias("time_over"), F.col("3D_dist_NM").alias("3D_dist_NM")),
+                "end_v_struct": F.struct(F.col("time_over").alias("time_over"), F.col("v_dist_ft").alias("v_dist_ft")),
+                "end_h_struct": F.struct(F.col("time_over").alias("time_over"), F.col("h_dist_NM").alias("h_dist_NM")),
+            
+                # Extremum values
+                "min_3D_struct": F.struct(F.col("3D_dist_NM").alias("3D_dist_NM"), F.col("time_over").alias("time_over")),
+                "max_3D_struct": F.struct(F.col("3D_dist_NM").alias("3D_dist_NM"), F.col("time_over").alias("time_over")),
+            
+                "min_v_struct": F.struct(F.col("v_dist_ft").alias("v_dist_ft"), F.col("time_over").alias("time_over")),
+                "max_v_struct": F.struct(F.col("v_dist_ft").alias("v_dist_ft"), F.col("time_over").alias("time_over")),
+            
+                "min_h_struct": F.struct(F.col("h_dist_NM").alias("h_dist_NM"), F.col("time_over").alias("time_over")),
+                "max_h_struct": F.struct(F.col("h_dist_NM").alias("h_dist_NM"), F.col("time_over").alias("time_over"))
+            })
+            
+            # Step 3: Group-level aggregation
+            agg_df = (
+                df_pairs
+                .groupBy("ce_id")
+                .agg(
+                    # Start (min time_over)
+                    F.min("start_3D_struct").alias("start_3D_struct"),
+                    F.min("start_v_struct").alias("start_v_struct"),
+                    F.min("start_h_struct").alias("start_h_struct"),
+            
+                    # End (max time_over)
+                    F.max("end_3D_struct").alias("end_3D_struct"),
+                    F.max("end_v_struct").alias("end_v_struct"),
+                    F.max("end_h_struct").alias("end_h_struct"),
+            
+                    # Min/max values
+                    F.min("3D_dist_NM").alias("min_3D_dist_NM"),
+                    F.max("3D_dist_NM").alias("max_3D_dist_NM"),
+                    F.min("v_dist_ft").alias("min_v_dist_ft"),
+                    F.max("v_dist_ft").alias("max_v_dist_ft"),
+                    F.min("h_dist_NM").alias("min_h_dist_NM"),
+                    F.max("h_dist_NM").alias("max_h_dist_NM"),
+            
+                    # Time of extrema
+                    F.min("min_3D_struct").alias("min_3D_struct"),
+                    F.max("max_3D_struct").alias("max_3D_struct"),
+                    F.min("min_v_struct").alias("min_v_struct"),
+                    F.max("max_v_struct").alias("max_v_struct"),
+                    F.min("min_h_struct").alias("min_h_struct"),
+                    F.max("max_h_struct").alias("max_h_struct")
                 )
-                
-                # Also round h_dist_NM and v_dist_ft
-                .withColumn(
-                    "h_dist_NM",
-                    F.round(F.col("h_dist_NM"),6)
+                .select(
+                    "ce_id",
+            
+                    # Extract start/end times and values
+                    F.col("start_3D_struct.time_over").alias("start_time"),
+                    F.col("end_3D_struct.time_over").alias("end_time"),
+                    F.col("start_3D_struct.3D_dist_NM").alias("start_3D_dist_NM"),
+                    F.col("end_3D_struct.3D_dist_NM").alias("end_3D_dist_NM"),
+            
+                    F.col("start_v_struct.v_dist_ft").alias("start_v_dist_ft"),
+                    F.col("end_v_struct.v_dist_ft").alias("end_v_dist_ft"),
+            
+                    F.col("start_h_struct.h_dist_NM").alias("start_h_dist_NM"),
+                    F.col("end_h_struct.h_dist_NM").alias("end_h_dist_NM"),
+            
+                    # Min/max values
+                    "min_3D_dist_NM", "max_3D_dist_NM",
+                    "min_v_dist_ft", "max_v_dist_ft",
+                    "min_h_dist_NM", "max_h_dist_NM",
+            
+                    # Times of extrema
+                    F.col("min_3D_struct.time_over").alias("min_3D_dist_NM_time"),
+                    F.col("max_3D_struct.time_over").alias("max_3D_dist_NM_time"),
+                    F.col("min_v_struct.time_over").alias("min_v_dist_ft_time"),
+                    F.col("max_v_struct.time_over").alias("max_v_dist_ft_time"),
+                    F.col("min_h_struct.time_over").alias("min_h_dist_NM_time"),
+                    F.col("max_h_struct.time_over").alias("max_h_dist_NM_time")
                 )
-                .withColumn(
-                    "v_dist_ft",
-                    F.round(F.col("v_dist_ft"), 6)
-                )
-                # start_time_over = time_over at first ordered time_over
-                .withColumn(
-                    "start_time",
-                    F.first(F.col("time_over")).over(full_window)
-                )
-                # end_time_over = time_over at last ordered time_over
-                .withColumn(
-                    "end_time",
-                    F.last(F.col("time_over")).over(full_window)
-                )
-                # start_3D_dist_NM = 3D_dist_NM at minimum time_over
-                .withColumn(
-                    "start_3D_dist_NM",
-                    F.first(F.col("3D_dist_NM")).over(full_window)
-                )
-                # end_v_dist_ft = v_dist_ft at maximum time_over
-                .withColumn(
-                    "end_3D_dist_NM",
-                    F.last(F.col("3D_dist_NM")).over(full_window)
-                )
-                # start_v_dist_ft = v_dist_ft at minimum time_over
-                .withColumn(
-                    "start_v_dist_ft",
-                    F.first(F.col("v_dist_ft")).over(full_window)
-                )
-                # end_v_dist_ft = v_dist_ft at maximum time_over
-                .withColumn(
-                    "end_v_dist_ft",
-                    F.last(F.col("v_dist_ft")).over(full_window)
-                )
-                # start_h_dist_NM = h_dist_NM at minimum time_over
-                .withColumn(
-                    "start_h_dist_NM",
-                    F.first(F.col("h_dist_NM")).over(full_window)
-                )
-                # end_h_dist_NM = h_dist_NM at maximum time_over
-                .withColumn(
-                    "end_h_dist_NM",
-                    F.last(F.col("h_dist_NM")).over(full_window)
-                )
-                # min_v_dist_ft = min(v_dist_ft) at any time_over
-                .withColumn(
-                    "min_3D_dist_NM",
-                    F.min(F.col("3D_dist_NM")).over(full_window)
-                )
-                # max_v_dist_ft = max(v_dist_ft) at any time_over
-                .withColumn(
-                    "max_3D_dist_NM",
-                    F.max(F.col("3D_dist_NM")).over(full_window)
-                )
-                # min_v_dist_ft = min(v_dist_ft) at any time_over
-                .withColumn(
-                    "min_v_dist_ft",
-                    F.min(F.col("v_dist_ft")).over(full_window)
-                )
-                # max_v_dist_ft = max(v_dist_ft) at any time_over
-                .withColumn(
-                    "max_v_dist_ft",
-                    F.max(F.col("v_dist_ft")).over(full_window)
-                )
-                # min_h_dist_NM = min(h_dist_NM) at any time_over
-                .withColumn(
-                    "min_h_dist_NM",
-                    F.min(F.col("h_dist_NM")).over(full_window)
-                )
-                # max_v_dist_ft = max(v_dist_ft) at any time_over
-                .withColumn(
-                    "max_h_dist_NM",
-                    F.max(F.col("h_dist_NM")).over(full_window)
-                )
-                
-                # Add times
-                .withColumn(
-                    "min_3D_dist_NM_time",
-                    F.first("time_over").over(min_3D_window)
-                )
-                .withColumn(
-                    "max_3D_dist_NM_time",
-                    F.first("time_over").over(max_3D_window)
-                )
-                .withColumn(
-                    "min_v_dist_ft_time",
-                    F.first("time_over").over(min_v_window)
-                )
-                .withColumn(
-                    "max_v_dist_ft_time",
-                    F.first("time_over").over(max_v_window)
-                )
-                .withColumn(
-                    "min_h_dist_NM_time",
-                    F.first("time_over").over(min_h_window)
-                )
-                .withColumn(
-                    "max_h_dist_NM_time",
-                    F.first("time_over").over(max_h_window)
-                )
-                # Boolean flags for extrema and boundary times
+            )
+            
+            # Step 4: Join aggregate results back
+            df_pairs = df_pairs.join(agg_df, on="ce_id", how="left")
+            
+            # Step 5: Add boolean flags
+            df_pairs = (
+                df_pairs
                 .withColumn("is_start_time", F.col("time_over") == F.col("start_time"))
                 .withColumn("is_end_time", F.col("time_over") == F.col("end_time"))
                 .withColumn("is_min_3D_dist_NM", F.col("3D_dist_NM") == F.col("min_3D_dist_NM"))
@@ -742,13 +713,21 @@ class CloseEncounters:
                 .withColumn("is_min_h_dist_NM", F.col("h_dist_NM") == F.col("min_h_dist_NM"))
                 .withColumn("is_max_h_dist_NM", F.col("h_dist_NM") == F.col("max_h_dist_NM"))
             )
-
-            df_pairs.cache()
-            logger.info("Found %d candidate close encounters", df_pairs.count())
             
-            self.close_encounter_sdf = df_pairs
-            return self.close_encounter_sdf
-        
+            # Step 6: Drop intermediate struct columns
+            df_pairs = df_pairs.drop(
+                "start_3D_struct", "end_3D_struct",
+                "start_v_struct", "end_v_struct",
+                "start_h_struct", "end_h_struct",
+                "min_3D_struct", "max_3D_struct",
+                "min_v_struct", "max_v_struct",
+                "min_h_struct", "max_h_struct"
+            )
+            
+            # Step 7: Cache final result
+            df_pairs.cache()
+
+
         if method == 'brute_force':
             # -----------------------------------------------------------------------------
             # Create pairwise combinations using self-join on indexed exploded DataFrame
@@ -921,9 +900,21 @@ class CloseEncounters:
                 )
             )
 
-            df = df_pairs.toPandas()
-            print(f"Number of unique BF ID pairs: {df.shape[0]}")
-            return df
+            df_pairs.cache()
+ 
+        logger.info("Found %d candidate close encounters", df_pairs.count())
+        
+        self.close_encounter_sdf = df_pairs
+        self.close_encounter_pdf = df_pairs.toPandas()
+
+        if output == 'pdf':
+            return self.close_encounter_pdf
+        
+        if output == 'sdf':
+            return self.close_encounter_sdf
+
+        if output is None:
+            return self
             
     def create_keplergl_map(self, display: bool = False) -> KeplerGl:
         """
@@ -981,7 +972,22 @@ class CloseEncounters:
         kepler_map.save_to_html(file_name=filename)
         
         logger.info(f"Kepler map saved to: {filename}. Note: To view it, (download and) open with a browser.")
-
+    
+    def get_close_encounters_sdf(self) -> DataFrame:
+        """
+        Return the close encounter results as a Spark DataFrame.
+    
+        Returns:
+            DataFrame: Close encounter pairs with spatial and temporal data.
+    
+        Raises:
+            ValueError: If results have not been computed yet.
+        """
+        
+        if self.close_encounter_sdf is None:
+            raise ValueError("No close encounter data found. Run find_close_encounters() or set manually.")
+        return self.close_encounter_sdf
+    
     def get_close_encounters_pdf(self) -> pd.DataFrame:
         """
         Return the close encounter results as a pandas DataFrame.
@@ -1087,9 +1093,15 @@ class CloseEncounters:
             bool: True if resampled trajectories are available, False otherwise.
         """
         return self.resampled_sdf is not None
+
+    def check_ce_present(self) -> bool:
+        """
+        Check whether resampling has been performed.
     
-
-
+        Returns:
+            bool: True if resampled trajectories are available, False otherwise.
+        """
+        return self.close_encounters_sdf is not None
 
     def filter_down_ce(self) -> pd.DataFrame:
         """
@@ -1285,3 +1297,137 @@ class CloseEncounters:
                 logger.info("DuckDB (1:1 Spark) found %d encounters", len(df))
                 self.close_encounter_pdf = df
                 return df
+
+    def expand_close_encounters(
+        self,
+        pre_seconds: int = 300,
+        post_seconds: int = 300,
+        step_seconds: int = 1
+    ):
+        """
+        Expands the limited trajectories in the close_encounters_sdf before and after the close encounters.
+        
+        :param df:          original Spark DataFrame
+        :param pre_seconds: seconds before start_time col to begin the fill window
+        :param post_seconds:seconds after  end_time col to end the fill window
+        :param step_seconds:interval step for the sequence, in seconds
+        :return:            a new DataFrame with one row per second in the
+                            extended window, original data where available,
+                            NULLs elsewhere
+        """
+        logger.info("Starting close encounter expansion with method='%s'", method)
+        
+        # Check if data is there
+        if (~self.check_ce_present() or ~self.check_trajectories_resampled()):
+            raise Exception("No trajectories resampled OR close encounters not yet calculated. \
+            Use .resample() and/or .find_close_encounters() before running this.")
+
+        # Define nested helper function
+        def add_col_suffix(
+            sdf : DataFrame, 
+            suffix: str
+        ) -> DataFrame:
+            """
+            Rename each column in the Spark DataFrame sdf by adding the suffix at the end.
+    
+            :param sdf:         original Spark DataFrame
+            :param suffix:      string to be added at the end
+            :return:            a new DataFrame with renamed columns (now containing suffix at the end of each column name).
+            """
+            renamed = []
+            for c in sdf.columns:
+                renamed.append(F.col(c).alias(f"{c}{suffix}"))
+            return sdf.select(*renamed)
+        
+        def add_empty_rows(
+            df: DataFrame,
+            pre_seconds: int = 300,
+            post_seconds: int = 300,
+            step_seconds: int = 1
+        ) -> DataFrame:
+            """
+            For each distinct id_col='ce_id' in df, generate a timestamp sequence from
+            (start_col='start_time' - pre_seconds=) to (end_col='end_time' + post_seconds) at step_seconds
+            resolution, then left-join to df so that every second in that full
+            range appears — with original values where they exist and NULLs elsewhere.
+        
+            :param df:          original Spark DataFrame
+            :param pre_seconds: seconds before start_time col to begin the fill window
+            :param post_seconds:seconds after  end_time col to end   the fill window
+            :param step_seconds:interval step for the sequence, in seconds
+            :return:            a new DataFrame with one row per second in the
+                                extended window, original data where available,
+                                NULLs elsewhere
+            """
+
+            # Column names definitions
+            id_col="ce_id"
+            time_col="time_over"
+            start_col="start_time"
+            end_col="end_time"
+            flight_id1_col='flight_id1'
+            flight_id2_col='flight_id2'
+            
+            #
+            
+            # 1. Extract each (id, start, end) window
+            windows = (
+                df
+                .select(id_col, start_col, end_col, flight_id1_col, flight_id2_col)
+                .distinct()
+            )
+        
+            # 2. Build a sequence of timestamps for each id
+            windows = windows.withColumn(
+                "_ts_array",
+                sequence(
+                    F.expr(f"{start_col} - interval {pre_seconds} seconds"),
+                    F.expr(f"{end_col} + interval {post_seconds} seconds"),
+                    F.expr(f"interval {step_seconds} seconds")
+                )
+            )
+        
+            # 3. Explode into one-row-per-timestamp
+            windows = (
+                windows
+                .withColumn(time_col, explode(col("_ts_array")))
+                .select(id_col, time_col, flight_id1_col, flight_id2_col)
+            )
+        
+            # 4. Left-join back to the full sequence so missing fields become NULL
+            result = (
+                windows
+                .join(df, on=[id_col, flight_id1_col, flight_id2_col, time_col], how="left")
+                .orderBy(id_col, time_col)
+            )
+        
+            return result
+
+        # Get data
+        resampled_sdf = self.get_resampled_sdf()
+        ce = self.get_close_encounters_sdf()
+
+        ce_expanded = add_empty_rows(
+            df=ce,
+            pre_seconds=600,
+            post_seconds=600,
+            step_seconds=1
+        )
+
+        resampled_sdf1 = add_col_suffix(resampled_sdf, suffix='1')\
+            .withColumn('flight_id1', col('flight_id1').cast(StringType()))
+        
+        resampled_sdf2 = add_col_suffix(resampled_sdf, suffix='2')\
+            .withColumn('flight_id2', col('flight_id2').cast(StringType()))
+
+
+        ce_expanded = ce_expanded.join(resampled_sdf1,
+           (resampled_sdf1.flight_id1 ==  ce_expanded.flight_id1) &
+           (resampled_sdf1.time_over1 == ce_expanded.time_over),
+           "left").join(resampled_sdf2,
+           (resampled_sdf2.flight_id2 ==  ce_expanded.flight_id2) &
+           (resampled_sdf2.time_over2 == ce_expanded.time_over),
+           "left")
+
+        return ce_expanded.toPandas()
+        
