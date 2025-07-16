@@ -596,26 +596,46 @@ class CloseEncounters:
                 .orderBy(F.col("time_over"))
                 .rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
             )
+            # Define ordering-based windows
+            min_3D_window = Window.partitionBy("ce_id").orderBy("3D_dist_NM", "time_over")
+            max_3D_window = Window.partitionBy("ce_id").orderBy(F.col("3D_dist_NM").desc(), "time_over")
+
+            min_v_window = Window.partitionBy("ce_id").orderBy("v_dist_ft", "time_over")
+            max_v_window = Window.partitionBy("ce_id").orderBy(F.col("v_dist_ft").desc(), "time_over")
+
+            min_h_window = Window.partitionBy("ce_id").orderBy("h_dist_NM", "time_over")
+            max_h_window = Window.partitionBy("ce_id").orderBy(F.col("h_dist_NM").desc(), "time_over")
 
             df_pairs = (
                 df_pairs
                 # Calculate 3D distance in NM
+                # Round to avoid floating point precision inequalities... 
                 .withColumn(
                     "3D_dist_NM",
-                    sqrt(
-                        (F.col("v_dist_ft") / 6076.12) ** 2 +
-                        F.col("h_dist_NM") ** 2
+                    F.round(
+                        sqrt((F.col("v_dist_ft") / 6076.12) ** 2 + F.col("h_dist_NM") ** 2),
+                        6
                     )
                 )
-                # start_time_over = time_over at minimum time_over
+                
+                # Also round h_dist_NM and v_dist_ft
+                .withColumn(
+                    "h_dist_NM",
+                    F.round(F.col("h_dist_NM"),6)
+                )
+                .withColumn(
+                    "v_dist_ft",
+                    F.round(F.col("v_dist_ft"), 6)
+                )
+                # start_time_over = time_over at first ordered time_over
                 .withColumn(
                     "start_time",
                     F.first(F.col("time_over")).over(full_window)
                 )
-                # end_time_over = time_over at minimum time_over
+                # end_time_over = time_over at last ordered time_over
                 .withColumn(
                     "end_time",
-                    F.first(F.col("time_over")).over(full_window)
+                    F.last(F.col("time_over")).over(full_window)
                 )
                 # start_3D_dist_NM = 3D_dist_NM at minimum time_over
                 .withColumn(
@@ -677,42 +697,31 @@ class CloseEncounters:
                     "max_h_dist_NM",
                     F.max(F.col("h_dist_NM")).over(full_window)
                 )
+                
                 # Add times
                 .withColumn(
                     "min_3D_dist_NM_time",
-                    F.first(
-                        F.when(F.col("3D_dist_NM") == F.col("min_3D_dist_NM"), F.col("time_over"))
-                    ).over(full_window)
+                    F.first("time_over").over(min_3D_window)
                 )
                 .withColumn(
                     "max_3D_dist_NM_time",
-                    F.first(
-                        F.when(F.col("3D_dist_NM") == F.col("max_3D_dist_NM"), F.col("time_over"))
-                    ).over(full_window)
+                    F.first("time_over").over(max_3D_window)
                 )
                 .withColumn(
                     "min_v_dist_ft_time",
-                    F.first(
-                        F.when(F.col("v_dist_ft") == F.col("min_v_dist_ft"), F.col("time_over"))
-                    ).over(full_window)
+                    F.first("time_over").over(min_v_window)
                 )
                 .withColumn(
                     "max_v_dist_ft_time",
-                    F.first(
-                        F.when(F.col("v_dist_ft") == F.col("max_v_dist_ft"), F.col("time_over"))
-                    ).over(full_window)
+                    F.first("time_over").over(max_v_window)
                 )
                 .withColumn(
                     "min_h_dist_NM_time",
-                    F.first(
-                        F.when(F.col("h_dist_NM") == F.col("min_h_dist_NM"), F.col("time_over"))
-                    ).over(full_window)
+                    F.first("time_over").over(min_h_window)
                 )
                 .withColumn(
                     "max_h_dist_NM_time",
-                    F.first(
-                        F.when(F.col("h_dist_NM") == F.col("max_h_dist_NM"), F.col("time_over"))
-                    ).over(full_window)
+                    F.first("time_over").over(max_h_window)
                 )
                 # Boolean flags for extrema and boundary times
                 .withColumn("is_start_time", F.col("time_over") == F.col("start_time"))
