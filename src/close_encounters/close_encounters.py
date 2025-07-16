@@ -10,7 +10,7 @@ from pyspark.sql.functions import (
     sin, cos, sqrt, atan2, lit, monotonically_increasing_id
 )
 from pyspark.sql.types import (
-    StringType, ArrayType, TimestampType)
+    DoubleType, IntegerType, LongType, TimestampType)
 from pyspark.sql import Window, DataFrame
 from tempo import *
 
@@ -197,6 +197,15 @@ class CloseEncounters:
             CloseEncounters: Self instance for method chaining.
         """
         traj_sdf = self.spark.read.parquet(parquet_path)
+        
+        traj_sdf = (
+            traj_sdf
+            .withColumn(flight_id_col, F.col(flight_id_col).cast(IntegerType()))
+            .withColumn(latitude_col, F.col(latitude_col).cast(DoubleType()))
+            .withColumn(longitude_col, F.col(longitude_col).cast(DoubleType()))
+            .withColumn(flight_level_col, F.col(flight_level_col).cast(IntegerType()))
+            .withColumn(time_over_col, F.col(time_over_col).cast(TimestampType()))
+        )
 
         logger.info(f"Loaded trajectory data from parquet: {parquet_path}")
         return self.load_spark_trajectories(
