@@ -10,7 +10,7 @@ from pyspark.sql.functions import (
     sin, cos, sqrt, atan2, lit, monotonically_increasing_id
 )
 from pyspark.sql.types import (
-    DoubleType, IntegerType, LongType, TimestampType)
+    DoubleType, IntegerType, LongType, TimestampType, StringType)
 from pyspark.sql import Window, DataFrame
 from tempo import *
 
@@ -475,7 +475,7 @@ class CloseEncounters:
                 .join(
                     df_indexed.alias("df2"),
                    (F.col("df1.time_over") == F.col("df2.time_over")) &
-                    (F.abs(F.col("df1.flight_level_ft") - F.col("df2.flight_level_ft")) <= v_dist_ft) &
+                    (F.abs(F.col("df1.flight_level_ft") - F.col("df2.flight_level_ft")) < v_dist_ft) &
                    (F.col("df1.h3_neighbour") == F.col("df2.h3_neighbour")) &
                    (F.col("df1.idx") < F.col("df2.idx"))
                 )
@@ -547,7 +547,7 @@ class CloseEncounters:
             # Calculate and filter based on height differense (s)
             # -----------------------------------------------------------------------------
             df_pairs = df_pairs.withColumn('v_dist_ft', F.abs(F.col("altitude_ft1") - F.col("altitude_ft2")))
-            df_pairs = df_pairs.filter(F.col('v_dist_ft') <= lit(v_dist_ft))
+            df_pairs = df_pairs.filter(F.col('v_dist_ft') < lit(v_dist_ft))
         
             # -----------------------------------------------------------------------------
             # Calulate and filter based on distance (km)
@@ -602,7 +602,10 @@ class CloseEncounters:
                 )
             )
 
-            ## Goal: Enrich dataset for Taxonomy
+            ##################################
+            # Enrich dataset for Taxonomy    #
+            ##################################
+            
             # Step 0: Cache previous calculations
             df_pairs = df_pairs.cache()
             
@@ -727,6 +730,137 @@ class CloseEncounters:
             # Step 7: Cache final result
             df_pairs.cache()
 
+            ##################################
+            # Label states                   #
+            ##################################
+            
+            # -------------------------------
+            # Step 1: Difference Calculations
+            # -------------------------------
+            
+            # Define time-ordered window per ce_id
+            window_spec = Window.partitionBy("ce_id").orderBy("time_over")
+            
+            # Compute differences
+            df_diff = df_pairs.withColumn(
+                "diff_3D_dist_NM", F.lead("3D_dist_NM").over(window_spec) - F.col("3D_dist_NM")
+            ).withColumn(
+                "diff_h_dist_NM", F.lead("h_dist_NM").over(window_spec) - F.col("h_dist_NM")
+            ).withColumn(
+                "diff_v_dist_ft", F.lead("v_dist_ft").over(window_spec) - F.col("v_dist_ft")
+            )
+            
+            # -------------------------------
+            # Step 2: Classify per-dimension states (D/C/P)
+            # -------------------------------
+            
+            def state_column(diff_col):
+                return F.when(F.col(diff_col) > 0, "D") \
+                        .when(F.col(diff_col) < 0, "C") \
+                        .when(F.col(diff_col) == 0, "P") \
+                        .otherwise(None)
+            
+            df_states = df_diff.withColumn(
+                "state_3D", state_column("diff_3D_dist_NM")
+            ).withColumn(
+                "state_h", state_column("diff_h_dist_NM")
+            ).withColumn(
+                "state_v", state_column("diff_v_dist_ft")
+            )
+            
+            # -------------------------------
+            # Step 3: General State Mapping
+            # -------------------------------
+            
+            # 27-pattern logic (including Impossible cases)
+            pattern_map = {
+                "C_C_C": "C",
+                "C_P_C": "C",
+                "C_P_D": "C",
+                "C_D_C": "C",
+                "C_D_D": "C",
+                "C_D_P": "P",
+                "C_C_P": "I",
+                "C_C_D": "I",
+                "C_P_P": "I",
+                "D_D_D": "D",
+                "D_P_D": "D",
+                "D_C_D": "D",
+                "D_C_P": "P",
+                "D_D_P": "I",
+                "D_P_P": "I",
+                "D_P_C": "I",
+                "D_D_C": "I",
+                "P_C_C": "C",
+                "P_D_D": "D",
+                "P_P_D": "C",
+                "P_D_P": "C",
+                "P_P_P": "P",
+                "P_C_D": "I",
+                "P_C_P": "I",
+                "P_D_C": "I",
+                "P_P_C": "I"
+            }
+            
+            # Map to Spark expression
+            pattern_expr = F.create_map([F.lit(k) for k in sum(pattern_map.items(), ())])
+            
+            # Create combined state pattern string and assign general_state
+            df_general = df_states.withColumn(
+                "general_state",
+                pattern_expr.getItem(F.concat_ws("_", "state_v", "state_h", "state_3D")),
+            )
+            
+            
+            # ----------------------------------------
+            # Step 4: Build State Profiles per ce_id
+            # ----------------------------------------
+            
+            # UDF to collapse repeated characters (e.g., 'PPPPDDCCC' -> 'PDC')
+            def collapse_repeats(seq: str) -> str:
+                if not seq:
+                    return ""
+                result = [seq[0]]
+                for ch in seq[1:]:
+                    if ch != result[-1]:
+                        result.append(ch)
+                return ''.join(result)
+            
+            collapse_repeats_udf = F.udf(collapse_repeats, StringType())
+            
+            # Assign row index for correct ordering
+            order_window = Window.partitionBy("ce_id").orderBy("time_over")
+            df_ordered = df_general.withColumn("row_idx", F.row_number().over(order_window))
+            
+            # Aggregate and sort states per ce_id
+            df_profiles_raw = df_ordered.groupBy("ce_id").agg(
+                F.sort_array(F.collect_list(F.struct("row_idx", "state_3D"))).alias("s3D_seq"),
+                F.sort_array(F.collect_list(F.struct("row_idx", "state_h"))).alias("sh_seq"),
+                F.sort_array(F.collect_list(F.struct("row_idx", "state_v"))).alias("sv_seq"),
+                F.sort_array(F.collect_list(F.struct("row_idx", "general_state"))).alias("gs_seq")
+            )
+            
+            # Extract raw and compressed profiles
+            df_profiles = df_profiles_raw.select(
+                "ce_id",
+                F.expr("concat_ws('', transform(s3D_seq, x -> x.state_3D))").alias("seq_state_3D"),
+                F.expr("concat_ws('', transform(sh_seq, x -> x.state_h))").alias("seq_state_h"),
+                F.expr("concat_ws('', transform(sv_seq, x -> x.state_v))").alias("seq_state_v"),
+                F.expr("concat_ws('', transform(gs_seq, x -> x.general_state))").alias("seq_general_state"),
+                collapse_repeats_udf(F.expr("concat_ws('', transform(s3D_seq, x -> x.state_3D))")).alias("profile_state_3D"),
+                collapse_repeats_udf(F.expr("concat_ws('', transform(sh_seq, x -> x.state_h))")).alias("profile_state_h"),
+                collapse_repeats_udf(F.expr("concat_ws('', transform(sv_seq, x -> x.state_v))")).alias("profile_state_v"),
+                collapse_repeats_udf(F.expr("concat_ws('', transform(gs_seq, x -> x.general_state))")).alias("profile_general_state")
+            )
+            
+            # ----------------------------------------
+            # Step 5: Join Profiles Back to Full Data
+            # ----------------------------------------
+            
+            df_enriched = df_general.join(df_profiles, on="ce_id", how="left")
+            
+            df_pairs = df_enriched
+
 
         if method == 'brute_force':
             # -----------------------------------------------------------------------------
@@ -800,7 +934,7 @@ class CloseEncounters:
             # Calculate and filter based on height differense (s)
             # -----------------------------------------------------------------------------
             df_pairs = df_pairs.withColumn('v_dist_ft', F.col("altitude_ft1") - F.col("altitude_ft2"))
-            df_pairs = df_pairs.filter(F.abs(F.col('v_dist_ft')) <= lit(v_dist_ft))
+            df_pairs = df_pairs.filter(F.abs(F.col('v_dist_ft')) < lit(v_dist_ft))
             #df_pairs.cache()
             #print(f"Number of pairs after FL filter {df_pairs.count()}")
 
@@ -901,6 +1035,9 @@ class CloseEncounters:
             )
 
             df_pairs.cache()
+
+
+            
  
         logger.info("Found %d candidate close encounters", df_pairs.count())
         
@@ -1101,7 +1238,7 @@ class CloseEncounters:
         Returns:
             bool: True if resampled trajectories are available, False otherwise.
         """
-        return self.close_encounters_sdf is not None
+        return self.close_encounter_sdf is not None
 
     def filter_down_ce(self) -> pd.DataFrame:
         """
@@ -1305,7 +1442,7 @@ class CloseEncounters:
         step_seconds: int = 1
     ):
         """
-        Expands the limited trajectories in the close_encounters_sdf before and after the close encounters.
+        Expands the limited trajectories in the close_encounter_sdf before and after the close encounters.
         
         :param df:          original Spark DataFrame
         :param pre_seconds: seconds before start_time col to begin the fill window
@@ -1315,10 +1452,10 @@ class CloseEncounters:
                             extended window, original data where available,
                             NULLs elsewhere
         """
-        logger.info("Starting close encounter expansion with method='%s'", method)
+        logger.info("Starting close encounter expansion")
         
         # Check if data is there
-        if (~self.check_ce_present() or ~self.check_trajectories_resampled()):
+        if not self.check_ce_present() or not self.check_trajectories_resampled():
             raise Exception("No trajectories resampled OR close encounters not yet calculated. \
             Use .resample() and/or .find_close_encounters() before running this.")
 
@@ -1336,7 +1473,11 @@ class CloseEncounters:
             """
             renamed = []
             for c in sdf.columns:
-                renamed.append(F.col(c).alias(f"{c}{suffix}"))
+                # Avoid double suffixing
+                if c.endswith(suffix):
+                    renamed.append(F.col(c))
+                else:
+                    renamed.append(F.col(c).alias(f"{c}{suffix}"))
             return sdf.select(*renamed)
         
         def add_empty_rows(
@@ -1368,8 +1509,6 @@ class CloseEncounters:
             flight_id1_col='flight_id1'
             flight_id2_col='flight_id2'
             
-            #
-            
             # 1. Extract each (id, start, end) window
             windows = (
                 df
@@ -1380,7 +1519,7 @@ class CloseEncounters:
             # 2. Build a sequence of timestamps for each id
             windows = windows.withColumn(
                 "_ts_array",
-                sequence(
+                F.sequence(
                     F.expr(f"{start_col} - interval {pre_seconds} seconds"),
                     F.expr(f"{end_col} + interval {post_seconds} seconds"),
                     F.expr(f"interval {step_seconds} seconds")
@@ -1404,30 +1543,37 @@ class CloseEncounters:
             return result
 
         # Get data
-        resampled_sdf = self.get_resampled_sdf()
+        resampled_sdf = self.get_resampled_trajectories_sdf()
         ce = self.get_close_encounters_sdf()
 
         ce_expanded = add_empty_rows(
             df=ce,
-            pre_seconds=600,
-            post_seconds=600,
-            step_seconds=1
+            pre_seconds=pre_seconds,
+            post_seconds=post_seconds,
+            step_seconds=step_seconds
         )
 
+        #ce_expanded = ce_expanded.withColumn(
+        #    "time_over",
+        #    F.expr("time_over - interval 2 hours")
+        #)
+
         resampled_sdf1 = add_col_suffix(resampled_sdf, suffix='1')\
-            .withColumn('flight_id1', col('flight_id1').cast(StringType()))
+            .drop('icao241')\
+            .withColumn('flight_id1', F.concat(F.lit("ID_"), col('flight_id1').cast(StringType())))
         
         resampled_sdf2 = add_col_suffix(resampled_sdf, suffix='2')\
-            .withColumn('flight_id2', col('flight_id2').cast(StringType()))
+            .drop('icao242')\
+            .withColumn('flight_id2', F.concat(F.lit("ID_"), col('flight_id2').cast(StringType())))
 
-
-        ce_expanded = ce_expanded.join(resampled_sdf1,
-           (resampled_sdf1.flight_id1 ==  ce_expanded.flight_id1) &
-           (resampled_sdf1.time_over1 == ce_expanded.time_over),
-           "left").join(resampled_sdf2,
-           (resampled_sdf2.flight_id2 ==  ce_expanded.flight_id2) &
-           (resampled_sdf2.time_over2 == ce_expanded.time_over),
-           "left")
+        ce_expanded = ce_expanded\
+            .withColumn("time_over1", F.col("time_over"))\
+            .withColumn("time_over2", F.col("time_over"))
+                    
+        ce_expanded = ce_expanded\
+            .join(resampled_sdf1, ['flight_id1', 'time_over1'], "left")\
+            .join(resampled_sdf2, ['flight_id2', 'time_over2'], "left")\
+            .drop('time_over1', 'time_over2')
 
         return ce_expanded.toPandas()
         
