@@ -33,7 +33,7 @@
     <img src="https://upload.wikimedia.org/wikipedia/commons/b/b2/Eurocontrol_logo_2010.svg" alt="Logo" width="80" height="80">
   </a>
 
-<h3 align="center">close proximity events</h3>
+<h3 align="center">Close Proximity Events (CPEs)</h3>
 
   <p align="center">
 The close proximity events Python package implements a fixed radius near neighbour search using (Uber's H3) cell techniques. Given a set of (aircraft) trajectories, it determines the optimal H3 resolution to work at given the fixed radius, interpolates and resamples (5s) the trajectories, adds Uber H3 indexes for each lat/lon at the optimal resolution and lastly applies the fixed radius near neighbour search cell techniques. At last, the Haversine distance is calculated between neighbours and filtered down to the fixed radius. 
