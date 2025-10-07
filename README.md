@@ -152,18 +152,57 @@ cd close-encounters && pip install -e .
 Once installed, you can run the code as follows: 
 
 ```python
-from close-encounters.h3_half_disk import *
+from close_encounters import CloseEncounters
+from pyspark.sql import SparkSession
 
 spark = SparkSession.builder \
-    .appName("CloseEncountersH3") \
-    .config("spark.driver.memory", "8g") \
-    .config("spark.executor.memory", "8g") \
-    .config("spark.executor.cores", "2") \
-    .config("spark.sql.shuffle.partitions", "20") \
-    .config("spark.rpc.message.maxSize", "256") \
+    .appName("CloseEncounters") \
+    .config("spark.executor.memory", "12g") \
+    .config("spark.driver.memory", "10g") \
+    .config("spark.executor.cores", "1") \
+    .config("spark.executor.instances", "5") \
+    .config("spark.sql.shuffle.partitions", "100") \
+    .config("spark.default.parallelism", "100") \
+    .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+    .config("spark.rpc.message.maxSize", "512") \
     .getOrCreate()
 
-encounters_df = CloseEncountersH3HalfDisk(coords_df, distance_nm = 5, FL_diff = 10, FL_min = 245, deltaT_min = 10, pnumb = 100, spark = spark)
+# Initiate Close Encounters with Spark
+ce = CloseEncounters(spark = spark)
+
+# Load sample
+ce = ce.load_sample_trajectories(nrows = 1000000)
+
+# Alternative, load from parquet
+# ce = ce.load_parquet_trajectories(
+#    parquet_path = 'data/flight_profiles_cpf_20240701_filtered.parquet',
+#    flight_id_col = 'FLIGHT_ID', 
+#    icao24_col = 'ICAO24',
+#    longitude_col = 'LONGITUDE',
+#    latitude_col = 'LATITUDE',
+#    time_over_col = 'TIME_OVER',
+#    flight_level_col = 'FLIGHT_LEVEL'
+#)
+
+# Resample trajectories
+ce = ce.resample(
+  freq_s = 1, # Resampling rate (s)
+  t_max= 10 # Set maximal interpolation time (min)
+)
+
+# Find Close Proximity Events
+ce_sdf = ce.find_close_encounters(
+    h_dist_NM = 5, # Max horizontal distance (NM)
+    v_dist_ft = 1000, # Max vertical distance (ft)
+    v_cutoff_FL = 245, # Flight level above which to look (FL) 
+    freq_s=1, # Resampling rate (s)
+    t_max=t_max, # Set maximal interpolation time (min)
+    method = 'half_disk' # Method to apply (other; full_disk, brute_force)
+)
+
+# Inspect
+ce_sdf.show()
+
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
