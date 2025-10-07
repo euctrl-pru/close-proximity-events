@@ -211,7 +211,8 @@ ce_sdf.show()
 ## Roadmap
 
 - [x] Feature 1: Create a PIP Package
-- [ ] Feature 2: Clean up and streamline code 
+- [x] Feature 2: Clean up and streamline code
+- [ ] Bugfix 1: Clean up terminology (Close proximity event / Close encounter)
 
 See the [open issues](https://github.com/euctrl-pru/close-proximity-events/issues) for a full list of proposed features (and known issues).
 
