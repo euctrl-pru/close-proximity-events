@@ -195,8 +195,8 @@ ce_sdf = ce.find_close_encounters(
     h_dist_NM = 5, # Max horizontal distance (NM)
     v_dist_ft = 1000, # Max vertical distance (ft)
     v_cutoff_FL = 245, # Flight level above which to look (FL) 
-    freq_s=1, # Resampling rate (s)
-    t_max=t_max, # Set maximal interpolation time (min)
+    freq_s = 1, # Resampling rate (s)
+    t_max = 10, # Set maximal interpolation time (min)
     method = 'half_disk' # Method to apply (other; full_disk, brute_force)
 )
 
