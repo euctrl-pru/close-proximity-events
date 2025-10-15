@@ -29,23 +29,23 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/euctrl-pru/close-encounters">
+  <a href="https://github.com/euctrl-pru/close-proximity-events">
     <img src="https://upload.wikimedia.org/wikipedia/commons/b/b2/Eurocontrol_logo_2010.svg" alt="Logo" width="80" height="80">
   </a>
 
-<h3 align="center">Close Encounters</h3>
+<h3 align="center">Close Proximity Events (CPEs)</h3>
 
   <p align="center">
-The close encounters Python package implements a fixed radius near neighbour search using (Uber's H3) cell techniques. Given a set of (aircraft) trajectories, it determines the optimal H3 resolution to work at given the fixed radius, interpolates and resamples (5s) the trajectories, adds Uber H3 indexes for each lat/lon at the optimal resolution and lastly applies the fixed radius near neighbour search cell techniques. At last, the Haversine distance is calculated between neighbours and filtered down to the fixed radius. 
+The close proximity events Python package implements a fixed radius near neighbour search using (Uber's H3) cell techniques. Given a set of (aircraft) trajectories, it determines the optimal H3 resolution to work at given the fixed radius, interpolates and resamples (5s) the trajectories, adds Uber H3 indexes for each lat/lon at the optimal resolution and lastly applies the fixed radius near neighbour search cell techniques. At last, the Haversine distance is calculated between neighbours and filtered down to the fixed radius. 
     <br />
-    <a href="https://github.com/euctrl-pru/close-encounters"><strong>Explore the docs »</strong></a>
+    <a href="https://github.com/euctrl-pru/close-proximity-events"><strong>Explore the docs »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/euctrl-pru/close-encounters">View Repo</a>
+    <a href="https://github.com/euctrl-pru/close-proximity-events">View Repo</a>
     &middot;
-    <a href="https://github.com/euctrl-pru/close-encounters/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
+    <a href="https://github.com/euctrl-pru/close-proximity-events/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
     &middot;
-    <a href="https://github.com/euctrl-pru/close-encounters/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
+    <a href="https://github.com/euctrl-pru/close-proximity-events/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
   </p>
 </div>
 
@@ -130,16 +130,16 @@ pip install pyspark==3.2.3
 
 By HTTPS:
 ```sh
-git clone https://github.com/euctrl-pru/close-encounters.git
+git clone https://github.com/euctrl-pru/close-proximity-events.git
 ```
 Or by SSH:
 ```sh
-git clone git@github.com:euctrl-pru/close-encounters.git 
+git clone git@github.com:euctrl-pru/close-proximity-events.git 
 ```
 
 2. PIP install cloned library locally
 ```sh
-cd close-encounters && pip install -e .
+cd close-proximity-events && pip install -e .
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -152,18 +152,57 @@ cd close-encounters && pip install -e .
 Once installed, you can run the code as follows: 
 
 ```python
-from close-encounters.h3_half_disk import *
+from close_encounters import CloseEncounters
+from pyspark.sql import SparkSession
 
 spark = SparkSession.builder \
-    .appName("CloseEncountersH3") \
-    .config("spark.driver.memory", "8g") \
-    .config("spark.executor.memory", "8g") \
-    .config("spark.executor.cores", "2") \
-    .config("spark.sql.shuffle.partitions", "20") \
-    .config("spark.rpc.message.maxSize", "256") \
+    .appName("CloseEncounters") \
+    .config("spark.executor.memory", "12g") \
+    .config("spark.driver.memory", "10g") \
+    .config("spark.executor.cores", "1") \
+    .config("spark.executor.instances", "5") \
+    .config("spark.sql.shuffle.partitions", "100") \
+    .config("spark.default.parallelism", "100") \
+    .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+    .config("spark.rpc.message.maxSize", "512") \
     .getOrCreate()
 
-encounters_df = CloseEncountersH3HalfDisk(coords_df, distance_nm = 5, FL_diff = 10, FL_min = 245, deltaT_min = 10, pnumb = 100, spark = spark)
+# Initiate Close Encounters with Spark
+ce = CloseEncounters(spark = spark)
+
+# Load sample
+ce = ce.load_sample_trajectories(nrows = 1000000)
+
+# Alternative, load from parquet
+# ce = ce.load_parquet_trajectories(
+#    parquet_path = 'data/flight_profiles_cpf_20240701_filtered.parquet',
+#    flight_id_col = 'FLIGHT_ID', 
+#    icao24_col = 'ICAO24',
+#    longitude_col = 'LONGITUDE',
+#    latitude_col = 'LATITUDE',
+#    time_over_col = 'TIME_OVER',
+#    flight_level_col = 'FLIGHT_LEVEL'
+#)
+
+# Resample trajectories
+ce = ce.resample(
+  freq_s = 1, # Resampling rate (s)
+  t_max= 10 # Set maximal interpolation time (min)
+)
+
+# Find Close Proximity Events
+ce_sdf = ce.find_close_encounters(
+    h_dist_NM = 5, # Max horizontal distance (NM)
+    v_dist_ft = 1000, # Max vertical distance (ft)
+    v_cutoff_FL = 245, # Flight level above which to look (FL) 
+    freq_s = 1, # Resampling rate (s)
+    t_max = 10, # Set maximal interpolation time (min)
+    method = 'half_disk' # Method to apply (other; full_disk, brute_force)
+)
+
+# Inspect
+ce_sdf.show()
+
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -172,9 +211,10 @@ encounters_df = CloseEncountersH3HalfDisk(coords_df, distance_nm = 5, FL_diff = 
 ## Roadmap
 
 - [x] Feature 1: Create a PIP Package
-- [ ] Feature 2: Clean up and streamline code 
+- [x] Feature 2: Clean up and streamline code
+- [ ] Bugfix 1: Clean up terminology (Close proximity event / Close encounter)
 
-See the [open issues](https://github.com/euctrl-pru/close-encounters/issues) for a full list of proposed features (and known issues).
+See the [open issues](https://github.com/euctrl-pru/close-proximity-events/issues) for a full list of proposed features (and known issues).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -205,7 +245,7 @@ Distributed under the MIT License (MIT). See `LICENSE.txt` for more information.
 Quinten GOENS, Aviation Intelligence Unit at [EUROCONTROL](https://www.eurocontrol.int) 
 * Email: [quinten.goens@eurocontrol.int](mailto:quinten.goens@eurocontrol.int) 
 
-Project Link: [https://github.com/euctrl-pru/close-encounters](https://github.com/euctrl-pru/close-encounters)
+Project Link: [https://github.com/euctrl-pru/close-proximity-events](https://github.com/euctrl-pru/close-proximity-events)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -219,16 +259,16 @@ Project Link: [https://github.com/euctrl-pru/close-encounters](https://github.co
 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-[contributors-shield]: https://img.shields.io/github/contributors/euctrl-pru/close-encounters.svg?style=for-the-badge
-[contributors-url]: https://github.com/euctrl-pru/close-encounters/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/euctrl-pru/close-encounters.svg?style=for-the-badge
-[forks-url]: https://github.com/euctrl-pru/close-encounters/network/members
-[stars-shield]: https://img.shields.io/github/stars/euctrl-pru/close-encounters.svg?style=for-the-badge
-[stars-url]: https://github.com/euctrl-pru/close-encounters/stargazers
-[issues-shield]: https://img.shields.io/github/issues/euctrl-pru/close-encounters.svg?style=for-the-badge
-[issues-url]: https://github.com/euctrl-pru/close-encounters/issues
-[license-shield]: https://img.shields.io/github/license/euctrl-pru/close-encounters.svg?style=for-the-badge
-[license-url]: https://github.com/euctrl-pru/close-encounters/blob/master/LICENSE.txt
+[contributors-shield]: https://img.shields.io/github/contributors/euctrl-pru/close-proximity-events.svg?style=for-the-badge
+[contributors-url]: https://github.com/euctrl-pru/close-proximity-events/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/euctrl-pru/close-proximity-events.svg?style=for-the-badge
+[forks-url]: https://github.com/euctrl-pru/close-proximity-events/network/members
+[stars-shield]: https://img.shields.io/github/stars/euctrl-pru/close-proximity-events.svg?style=for-the-badge
+[stars-url]: https://github.com/euctrl-pru/close-proximity-events/stargazers
+[issues-shield]: https://img.shields.io/github/issues/euctrl-pru/close-proximity-events.svg?style=for-the-badge
+[issues-url]: https://github.com/euctrl-pru/close-proximity-events/issues
+[license-shield]: https://img.shields.io/github/license/euctrl-pru/close-proximity-events.svg?style=for-the-badge
+[license-url]: https://github.com/euctrl-pru/close-proximity-events/blob/master/LICENSE.txt
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
 [linkedin-url]: https://linkedin.com/in/quinten-goens
 [product-screenshot]: images/screenshot.png
