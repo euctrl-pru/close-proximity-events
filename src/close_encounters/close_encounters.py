@@ -13,6 +13,7 @@ from pyspark.sql.types import (
     DoubleType, IntegerType, LongType, TimestampType, StringType)
 from pyspark.sql import Window, DataFrame
 from tempo import *
+from pyspark.storagelevel import StorageLevel
 
 # Data libraries
 import h3
@@ -23,6 +24,8 @@ from datetime import datetime
 import duckdb
 import tempfile
 import os
+import gc
+from typing import Optional
 
 # File libraries
 from importlib.resources import files
@@ -122,6 +125,15 @@ class CloseEncounters:
         # Cast time_over to timestamp type
         traj_sdf = traj_sdf.withColumn("time_over", F.to_utc_timestamp(F.col("time_over"), "UTC"))
 
+        traj_sdf = (
+            traj_sdf
+            .withColumn(flight_id_col, F.col(flight_id_col).cast(IntegerType()))
+            .withColumn(latitude_col, F.col(latitude_col).cast(DoubleType()))
+            .withColumn(longitude_col, F.col(longitude_col).cast(DoubleType()))
+            .withColumn(flight_level_col, F.col(flight_level_col).cast(IntegerType()))
+            .withColumn(time_over_col, F.col(time_over_col).cast(TimestampType()))
+        )
+        
         self.traj_sdf = traj_sdf.select(
             F.col('flight_id'),
             F.col('icao24'),
@@ -292,7 +304,7 @@ class CloseEncounters:
         with data_path.open("rb") as json_file:
             return json.load(json_file)
     
-    def resample(self, freq_s=5, t_max=10, p_numb=100):
+    def resample(self, freq_s=5, t_max=10, p_numb=128):
         """
         Resample the trajectory data at a fixed interval and linearly interpolate missing values.
         
@@ -386,7 +398,7 @@ class CloseEncounters:
         # Add a segment ID
         resampled_sdf = resampled_sdf.withColumn("segment_id", monotonically_increasing_id())
         resampled_sdf = resampled_sdf.repartition(p_numb, ["flight_id", "segment_id"])
-        resampled_sdf.cache() # Keep, this is needed to persist the IDs and speed up further calculations
+        resampled_sdf.persist(StorageLevel.MEMORY_AND_DISK) # Keep, this is needed to persist the IDs and speed up further calculations
         resampled_sdf.count()
 
         # Housekeeping
@@ -397,6 +409,279 @@ class CloseEncounters:
         logger.info("Resampling complete. Total segments: %d", self.resampled_sdf.count())
         return self
 
+    def resample_pol2(self, freq_s: int = 5, t_max: int = 10, p_numb: int = 128):
+        """
+        Resample trajectories onto a fixed time grid and fill missing positions using
+        per-flight quadratic (2nd-order polynomial) interpolation in Spark.
+    
+        This method:
+          - Creates an evenly spaced time grid every `freq_s` seconds per (flight_id, icao24)
+          - Fits separate quadratic polynomials for latitude, longitude, and altitude (in feet)
+            against time (seconds) using the *available* original samples
+          - Interpolates only over gaps whose length <= `t_max` minutes; longer gaps are left
+            unfilled and the corresponding grid rows are dropped
+          - Returns data with the same column layout and semantics as `.resample()`, including:
+              * latitude, longitude, flight_level_ft, time_over, flight_id, icao24
+              * is_ts_interpolated (True for points we synthesized, False for originals)
+              * segment_id (unique id)
+          - Persists the resulting Spark DataFrame and sets `self.resampled_sdf`,
+            `self.resample_freq_s`, and `self.resample_t_max`
+    
+        Parameters
+        ----------
+        freq_s : int, default 5
+            Resampling frequency (seconds).
+        t_max : int, default 10
+            Maximum allowed gap (minutes) to interpolate across. Longer gaps are not filled
+            and rows within those gaps are dropped.
+        p_numb : int, default 128
+            Number of Spark partitions for the output.
+    
+        Returns
+        -------
+        CloseEncounters
+            Self instance for method chaining.
+    
+        Notes
+        -----
+        * Uses a pandas GROUPED_MAP UDF per (flight_id, icao24) to do the polynomial fitting
+          with NumPy. For numerical stability we fit against time in seconds relative to the
+          first timestamp in each group.
+        * If there are fewer than 3 distinct time points in a group (insufficient to fit a
+          quadratic), it falls back to a linear fit; if fewer than 2 points, no interpolation
+          is performed (only original rows are emitted).
+        """
+        if (self.resample_freq_s == freq_s) and (self.resample_t_max == t_max) and (self.resampled_sdf is not None):
+            logger.info("Skipping resample_pol2: already done (freq_s=%s, t_max=%s)", freq_s, t_max)
+            return self
+    
+        if self.traj_sdf is None:
+            raise ValueError("No trajectories loaded. Use load_*_trajectories() before resampling.")
+    
+        import pandas as _pd
+        import numpy as _np
+        from pyspark.sql.types import (
+            StructType, StructField, IntegerType, StringType, TimestampType, DoubleType, BooleanType
+        )
+    
+        logger.info("Starting quadratic resampling (freq_s=%s s, t_max=%s min)...", freq_s, t_max)
+    
+        # Base frame with altitude in feet; mirror your linear resample pre-step
+        base = (
+            self.traj_sdf
+            .withColumn("flight_level_ft", (F.col("flight_level") * F.lit(100)).cast(DoubleType()))
+            .drop("flight_level")
+            .select("flight_id", "icao24", "longitude", "latitude", "time_over", "flight_level_ft")
+        )
+    
+        # Per-flight min/max times to build a uniform grid
+        bounds = (
+            base.groupBy("flight_id", "icao24")
+            .agg(F.min("time_over").alias("tmin"), F.max("time_over").alias("tmax"))
+        )
+    
+        # Generate seconds grid per flight between tmin and tmax
+        grid = (
+            bounds
+            .withColumn(
+                "time_over",
+                F.explode(
+                    F.sequence(
+                        F.col("tmin"),
+                        F.col("tmax"),
+                        F.expr(f"INTERVAL {int(freq_s)} SECONDS")
+                    )
+                )
+            )
+            .select("flight_id", "icao24", "time_over")
+        )
+    
+        # Join grid to base to know which timestamps are originals vs. missing
+        # We'll interpolate only where nulls appear.
+        grid_joined = (
+            grid.join(
+                base,
+                on=["flight_id", "icao24", "time_over"],
+                how="left"
+            )
+        )
+    
+        # Prepare schema for grouped map UDF
+        out_schema = StructType([
+            StructField("flight_id", IntegerType(), False),
+            StructField("icao24", StringType(), False),
+            StructField("time_over", TimestampType(), False),
+            StructField("latitude", DoubleType(), True),
+            StructField("longitude", DoubleType(), True),
+            StructField("flight_level_ft", DoubleType(), True),
+            StructField("is_ts_interpolated", BooleanType(), False),
+        ])
+    
+        # Helper inside the UDF: fit poly with graceful fallback
+        def _fit_and_predict(x_sec: _np.ndarray, y: _np.ndarray, xq_sec: _np.ndarray):
+            """
+            Fit y ~ poly(x, deg=2). If insufficient points, fall back to deg=1.
+            If still insufficient (<2), return NaNs for predictions.
+            """
+            x_sec = _np.asarray(x_sec, dtype=float)
+            y = _np.asarray(y, dtype=float)
+            xq_sec = _np.asarray(xq_sec, dtype=float)
+    
+            # Filter out NaNs in y for fitting
+            mask = ~_np.isnan(y)
+            x_fit = x_sec[mask]
+            y_fit = y[mask]
+    
+            if x_fit.size >= 3:
+                deg = 2
+            elif x_fit.size >= 2:
+                deg = 1
+            else:
+                # Not enough points to fit anything
+                return _np.full_like(xq_sec, _np.nan, dtype=float)
+    
+            try:
+                # Center x for numerical stability
+                x0 = x_fit[0]
+                coeff = _np.polyfit(x_fit - x0, y_fit, deg)
+                y_pred = _np.polyval(coeff, xq_sec - x0)
+                return y_pred
+            except Exception:
+                # Fallback to NaNs if polyfit fails
+                return _np.full_like(xq_sec, _np.nan, dtype=float)
+    
+        t_max_seconds = int(t_max) * 60
+        step = int(freq_s)
+    
+        @F.pandas_udf(out_schema, functionType=F.PandasUDFType.GROUPED_MAP)  # type: ignore[attr-defined]
+        def _interp_group(pdf: _pd.DataFrame) -> _pd.DataFrame:
+            """
+            Run per-flight interpolation. `pdf` contains all rows for one (flight_id, icao24)
+            across the uniform grid with original values where present and NaNs elsewhere.
+            """
+            # Ensure deterministic order
+            pdf = pdf.sort_values("time_over").reset_index(drop=True)
+    
+            # Build time (seconds) relative to first timestamp in the group
+            t0 = _pd.to_datetime(pdf["time_over"].iloc[0]).to_datetime64()
+            # seconds since t0
+            x_sec = ((pdf["time_over"].values.astype("datetime64[s]") - t0) / _np.timedelta64(1, "s")).astype(float)
+    
+            # Known (original) samples: any row where *all three* values present is considered original
+            # (this matches typical ADS-B completeness; adjust if needed)
+            known_mask = pdf[["latitude", "longitude", "flight_level_ft"]].notna().all(axis=1)
+    
+            # Interpolate candidates = rows with ANY missing value
+            cand_mask = ~known_mask
+    
+            # Predict with polynomial for each series
+            lat_pred = _fit_and_predict(x_sec, pdf["latitude"].to_numpy(), x_sec)
+            lon_pred = _fit_and_predict(x_sec, pdf["longitude"].to_numpy(), x_sec)
+            alt_pred = _fit_and_predict(x_sec, pdf["flight_level_ft"].to_numpy(), x_sec)
+    
+            # Start with originals where present
+            lat_out = pdf["latitude"].to_numpy().astype(float)
+            lon_out = pdf["longitude"].to_numpy().astype(float)
+            alt_out = pdf["flight_level_ft"].to_numpy().astype(float)
+    
+            # Fill only candidate rows with model predictions
+            lat_out[cand_mask] = lat_pred[cand_mask]
+            lon_out[cand_mask] = lon_pred[cand_mask]
+            alt_out[cand_mask] = alt_pred[cand_mask]
+    
+            # Enforce the t_max rule: identify contiguous runs of *missing in originals*
+            # and compute their span in seconds. If a run exceeds t_max_seconds, we DROP
+            # those interpolated rows entirely.
+            # Build run IDs over cand_mask
+            run_id = _np.zeros(len(pdf), dtype=int)
+            rid = 0
+            for i in range(len(pdf)):
+                if cand_mask[i]:
+                    if i > 0 and cand_mask[i - 1]:
+                        run_id[i] = rid
+                    else:
+                        rid += 1
+                        run_id[i] = rid
+                else:
+                    run_id[i] = 0  # not part of a missing run
+    
+            # Compute run spans in seconds (based on grid spacing and edges)
+            drop_mask = _np.zeros(len(pdf), dtype=bool)
+            if rid > 0:
+                for r in range(1, rid + 1):
+                    idx = _np.where(run_id == r)[0]
+                    if idx.size == 0:
+                        continue
+                    # Duration = (count - 1) * step, but also consider that a single gap
+                    # between two known points spans (len+1) intervals; use neighbor times if available
+                    left = idx[0] - 1
+                    right = idx[-1] + 1
+                    if left >= 0 and right < len(pdf):
+                        span_sec = (x_sec[right] - x_sec[left])
+                    else:
+                        # At the edges, approximate by count * step
+                        span_sec = (idx.size * step)
+                    if span_sec > t_max_seconds:
+                        drop_mask[idx] = True
+    
+            # Build is_ts_interpolated: True for rows we filled (and kept), False for originals
+            is_interp = cand_mask & (~drop_mask) & _np.isfinite(lat_out) & _np.isfinite(lon_out) & _np.isfinite(alt_out)
+    
+            # Drop over-long gaps
+            keep_mask = (~drop_mask)
+            out = _pd.DataFrame({
+                "flight_id": pdf.loc[keep_mask, "flight_id"].astype("int32").to_numpy(),
+                "icao24": pdf.loc[keep_mask, "icao24"].astype("string").to_numpy(),
+                "time_over": pdf.loc[keep_mask, "time_over"].to_numpy(),
+                "latitude": lat_out[keep_mask],
+                "longitude": lon_out[keep_mask],
+                "flight_level_ft": alt_out[keep_mask],
+                "is_ts_interpolated": is_interp[keep_mask].astype(bool),
+            })
+    
+            # Ensure Python native strings (Spark <=3 quirks)
+            out["icao24"] = out["icao24"].astype(str)
+    
+            return out
+    
+        # Apply grouped interpolation
+        interp = (
+            grid_joined
+            .select("flight_id", "icao24", "time_over", "latitude", "longitude", "flight_level_ft")
+            .groupBy("flight_id", "icao24")
+            .apply(_interp_group)
+        )
+    
+        # Repartition, add deterministic-ish segment ids, persist
+        resampled_sdf = (
+            interp
+            .repartition(p_numb, "flight_id")
+            .withColumn("segment_id", monotonically_increasing_id())
+            .select(
+                "flight_id",
+                "icao24",
+                "longitude",
+                "latitude",
+                "time_over",
+                "flight_level_ft",
+                "is_ts_interpolated",
+                "segment_id",
+            )
+        )
+    
+        resampled_sdf.persist(StorageLevel.MEMORY_AND_DISK)
+        # Trigger materialization (and log)
+        total_segments = resampled_sdf.count()
+        logger.info("Quadratic resampling complete. Total segments: %d", total_segments)
+    
+        # Housekeeping (mirror .resample)
+        self.resampled_sdf = resampled_sdf
+        self.resample_freq_s = freq_s
+        self.resample_t_max = t_max
+    
+        return self
+
+    
     def find_close_encounters(
         self,
         h_dist_NM = 5, 
@@ -404,7 +689,7 @@ class CloseEncounters:
         v_cutoff_FL = 245, 
         freq_s=5, 
         t_max=10, 
-        p_numb=100,
+        p_numb=128,
         method='half_disk',
         output = 'self'
     ):
@@ -438,6 +723,8 @@ class CloseEncounters:
 
             # Cutoff 
             resampled_co = self.resampled_sdf.filter(F.col('flight_level_ft') >= lit(v_cutoff_FL)*100)
+
+            print(f'The number of records above flight_lvel 245 are: {resampled_co.count()}')
             
             # Add H3 index and neighbors
             resampled_w_h3 = resampled_co.withColumn("h3_index", lat_lon_to_h3_udf(F.col("latitude"), F.col("longitude"), lit(resolution)))
@@ -557,7 +844,7 @@ class CloseEncounters:
                            .withColumn("lat2_rad", radians(F.col("lat2"))) \
                            .withColumn("lon1_rad", radians(F.col("lon1"))) \
                            .withColumn("lon2_rad", radians(F.col("lon2")))
-        
+            
             df_pairs = df_pairs.withColumn(
                 "h_dist_NM",
                 0.539957 * 2 * CloseEncounters.earth_radius_km * atan2(
@@ -575,9 +862,13 @@ class CloseEncounters:
             )
         
             df_pairs = df_pairs.drop('lat1_rad', 'lat2_rad', 'lon1_rad', 'lon2_rad')
-        
+
+            print(f"The number of done Haversine calculations are: {df_pairs.count()}")
+            
             df_pairs = df_pairs.filter(F.col('h_dist_NM') <= lit(h_dist_NM))
-        
+
+            print(f"The number of done records after filtering are: {df_pairs.count()}")
+            
             # -----------------------------------------------------------------------------
             # Enrich sample
             # -----------------------------------------------------------------------------
@@ -606,8 +897,6 @@ class CloseEncounters:
             # Enrich dataset for Taxonomy    #
             ##################################
             
-            # Step 0: Cache previous calculations
-            df_pairs = df_pairs.cache()
             
             # Step 1: Compute and round distances
             df_pairs = (
@@ -728,7 +1017,7 @@ class CloseEncounters:
             )
             
             # Step 7: Cache final result
-            df_pairs.cache()
+            df_pairs.persist(StorageLevel.MEMORY_AND_DISK)
 
             ##################################
             # Label states                   #
@@ -776,9 +1065,9 @@ class CloseEncounters:
             pattern_map = {
                 "C_C_C": "C",
                 "C_P_C": "C",
-                "C_P_D": "C",
+                "C_P_D": "I",
                 "C_D_C": "C",
-                "C_D_D": "C",
+                "C_D_D": "D",
                 "C_D_P": "P",
                 "C_C_P": "I",
                 "C_C_D": "I",
@@ -791,10 +1080,11 @@ class CloseEncounters:
                 "D_P_P": "I",
                 "D_P_C": "I",
                 "D_D_C": "I",
+                "D_C_C": "C",
                 "P_C_C": "C",
                 "P_D_D": "D",
-                "P_P_D": "C",
-                "P_D_P": "C",
+                "P_P_D": "I",
+                "P_D_P": "D",
                 "P_P_P": "P",
                 "P_C_D": "I",
                 "P_C_P": "I",
@@ -1036,8 +1326,20 @@ class CloseEncounters:
 
             df_pairs.cache()
 
+        # Add ce_phase
 
-            
+        df_pairs = df_pairs\
+            .withColumn(
+                "ce_phase", F.lit(True)
+            )\
+            .withColumn(
+                "ce_phase_stca_upper_flag", 
+                (col('h_dist_NM') <= F.lit(4.75)) & (col('v_dist_ft') <= F.lit(800)) 
+            )\
+            .withColumn(
+                "ce_phase_stca_lower_flag",
+                (col('h_dist_NM') <= F.lit(3)) & (col('v_dist_ft') <= F.lit(700)) 
+            )
  
         logger.info("Found %d candidate close encounters", df_pairs.count())
         
@@ -1279,7 +1581,7 @@ class CloseEncounters:
         v_cutoff_FL=245,
         freq_s=5,
         t_max=10,
-        p_numb=100
+        p_numb=128
          ):
             """
             DuckDB-based detection that exactly reproduces the Spark half-disk logic,
@@ -1545,18 +1847,13 @@ class CloseEncounters:
         # Get data
         resampled_sdf = self.get_resampled_trajectories_sdf()
         ce = self.get_close_encounters_sdf()
-
+        
         ce_expanded = add_empty_rows(
             df=ce,
             pre_seconds=pre_seconds,
             post_seconds=post_seconds,
             step_seconds=step_seconds
         )
-
-        #ce_expanded = ce_expanded.withColumn(
-        #    "time_over",
-        #    F.expr("time_over - interval 2 hours")
-        #)
 
         resampled_sdf1 = add_col_suffix(resampled_sdf, suffix='1')\
             .drop('icao241')\
@@ -1575,5 +1872,221 @@ class CloseEncounters:
             .join(resampled_sdf2, ['flight_id2', 'time_over2'], "left")\
             .drop('time_over1', 'time_over2')
 
-        return ce_expanded.toPandas()
-        
+        # Fill nulls
+        ce_expanded = ce_expanded.fillna(
+            {
+                "ce_phase": False,
+                "ce_phase_stca_upper_flag": False,
+                "ce_phase_stca_lower_flag": False
+            }
+        )
+        return ce_expanded
+    
+    # -------------------------
+    # Resource management
+    # -------------------------
+    def _safe_unpersist(self, df) -> None:
+        """
+        Unpersist a Spark DataFrame if possible. Ignores errors and None values.
+        """
+        if df is None:
+            return
+        try:
+            df.unpersist(blocking=False)
+        except Exception:
+            pass
+    
+    def _clear_all_sql_caches(spark: SparkSession) -> None:
+        """
+        Clear all SQL/DataFrame caches, including temp/global temp views,
+        and uncache any cached tables across all databases.
+    
+        This is safe to call repeatedly. Errors are swallowed intentionally.
+        """
+        try:
+            # CLEAR CACHE handles cached relations registered with the SQL cache.
+            spark.sql("CLEAR CACHE")
+        except Exception:
+            pass
+    
+        try:
+            spark.catalog.clearCache()
+        except Exception:
+            pass
+    
+        # Uncache tables in all databases (including default)
+        try:
+            for db in [d.name for d in spark.catalog.listDatabases()]:
+                try:
+                    for t in spark.catalog.listTables(db):
+                        fqtn = f"{t.database}.{t.name}" if t.database else t.name
+                        try:
+                            if t.isTemporary:
+                                # Drop temp views explicitly
+                                try:
+                                    spark.catalog.dropTempView(t.name)
+                                except Exception:
+                                    pass
+                            # Attempt to uncache table/view; harmless if not cached
+                            spark.catalog.uncacheTable(fqtn)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+        # Drop all global temp views (if any)
+        try:
+            for t in spark.catalog.listTables("global_temp"):
+                try:
+                    spark.catalog.dropGlobalTempView(t.name)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+        # JVM-level nuke of the cache manager (belt-and-braces)
+        try:
+            spark._jsparkSession.sharedState().cacheManager().clearCache()
+        except Exception:
+            pass
+    
+    
+    def _unpersist_all_rdds(spark: SparkSession) -> None:
+        """
+        Unpersist every persisted RDD registered with the SparkContext.
+    
+        Some libraries persist RDDs internally; this ensures they are released.
+        """
+        try:
+            for rdd in spark.sparkContext.getPersistentRDDs().values():
+                try:
+                    rdd.unpersist(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    
+    def _safe_remove_dir(path: str) -> None:
+        """
+        Best-effort removal of a directory tree. Use only for *your* scratch subdir
+        under a non-ephemeral mount (e.g., PVC). Never point this at system dirs.
+        """
+        try:
+            import shutil
+            if path and os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
+    
+    
+    def release_all_spark_artifacts(
+        spark: Optional[SparkSession],
+        extra_local_dirs: Optional[list[str]] = None
+    ) -> None:
+        """
+        Release caches, persisted RDDs, and optionally scrub custom scratch dirs.
+    
+        Args:
+            spark: Active SparkSession (can be None).
+            extra_local_dirs: Optional list of local directories to clean
+                              (e.g., your per-iteration subdir under a PVC).
+        """
+        if spark is None:
+            return
+    
+        _clear_all_sql_caches(spark)
+        _unpersist_all_rdds(spark)
+    
+        # Optional: clean custom scratch directories between iterations
+        for d in extra_local_dirs or []:
+            _safe_remove_dir(d)
+    
+        # Python-side GC helps old Broadcast/Arrow refs become collectable
+        gc.collect()
+
+    
+    
+    def close(
+        self,
+        stop_spark: bool = False,
+        cancel_jobs: bool = False,
+        clear_catalog_cache: bool = True
+    ) -> None:
+        """
+        Release cached/persisted Spark DataFrames and large Python-side objects.
+    
+        Parameters
+        ----------
+        stop_spark : bool, default False
+            If True, stops the SparkSession owned by this instance.
+        cancel_jobs : bool, default False
+            If True, cancels any active Spark jobs before unpersisting.
+        clear_catalog_cache : bool, default True
+            If True, clears the Spark SQL catalog cache (tables, broadcast joins).
+        """
+        try:
+            if cancel_jobs and hasattr(self, "spark") and self.spark is not None:
+                try:
+                    self.spark.sparkContext.cancelAllJobs()
+                except Exception:
+                    pass
+    
+            # Unpersist DataFrames we reference
+            for df in [
+                getattr(self, "resampled_sdf", None),
+                getattr(self, "close_encounter_sdf", None),
+                getattr(self, "traj_sdf", None),
+            ]:
+                self._safe_unpersist(df)
+    
+            # Clear broader caches (SQL caches, cached tables/views, persisted RDDs)
+            if clear_catalog_cache and hasattr(self, "spark") and self.spark is not None:
+                try:
+                    release_all_spark_artifacts(
+                        self.spark,
+                        # Optional: clean a per-iteration scratch dir if you create one
+                        extra_local_dirs=[]
+                    )
+                except Exception:
+                    pass
+    
+            # Drop large Python-side objects we might hold on to
+            self.close_encounter_pdf = None
+    
+            # Encourage Python GC (helps after large toPandas())
+            gc.collect()
+    
+            # Optionally stop Spark (only if you truly own it)
+            if stop_spark and hasattr(self, "spark") and self.spark is not None:
+                try:
+                    self.spark.stop()
+                except Exception:
+                    pass
+    
+        finally:
+            # Ensure attributes don't hold references
+            self.resampled_sdf = None
+            self.close_encounter_sdf = None
+            self.traj_sdf = None
+
+
+    # Context manager support: use "with CloseEncounters(spark) as ce:"
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # Do not stop the shared SparkSession by default
+        self.close(stop_spark=False)
+        # Returning False propagates exceptions, which is usually what you want
+        return False
+
+    # Best-effort fallback; not guaranteed to run at interpreter shutdown
+    def __del__(self):
+        try:
+            self.close(stop_spark=False)
+        except Exception:
+            # Avoid raising from destructor
+            pass
